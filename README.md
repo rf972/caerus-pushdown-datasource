@@ -2,8 +2,8 @@ This is a new Spark V2 datasource, which has support for
 pushdown of filter, project and aggregate.
 This data source can operate against either HDFS or S3.
 
-The best way to get started with this datasource is to check out the demo detailed here:
-https://github.com/futurewei-cloud/caerus-dike/blob/master/README.md
+The best way to get started with this datasource is to check out the demo detailed here:<BR>
+https://github.com/open-infrastructure-labs/caerus-dike/blob/master/README.md
 That repo can build and run dockers, which will fully demonstrate this datasource.
 That repo will bring up Spark with this datasource and with an S3 server, and an HDFS server.
 
@@ -18,16 +18,16 @@ The datasource requires the following below jars and packages
 - Hadoop version, compatible with Spark.
 
 For working examples of this datasource, use the below caerus-dike repo to lauch Spark.  
-One example of this is here:
-https://github.com/futurewei-cloud/caerus-dike/blob/master/spark/examples/scala/run_example.sh
+One example of this is here:<BR>
+https://github.com/open-infrastructure-labs/caerus-dike/blob/master/spark/examples/scala/run_example.sh
 
-Or just follow the README.md to run a demo.
-https://github.com/futurewei-cloud/caerus-dike/blob/master/README.md
+Or just follow the README.md to run a demo.<BR>
+https://github.com/open-infrastructure-labs/caerus-dike/blob/master/README.md
 
 Use of datasource
 =================
-Working examples that use this datasource can be found here:
-https://github.com/futurewei-cloud/caerus-dike/blob/master/spark/examples/scala/
+Working examples that use this datasource can be found here:<BR>
+https://github.com/open-infrastructure-labs/caerus-dike/blob/master/spark/examples/scala/
 
 The data source can be used with the following parameters to the spark session's read command.
 
@@ -76,7 +76,7 @@ spark.read
      .load("ndphdfs://hdfs-server/table.tbl")
 ```
 
-To disable just aggregate:
+To disable just aggregate pushdown:
 
 ```
 spark.read
@@ -89,20 +89,21 @@ spark.read
 
 Supported formats
 =================
-Currently, only .tbl, a pipe (|) deliminated format is supported.  This is the format used by the TPCH benchmark.
+Currently, only .tbl, a pipe (|) deliminated format is supported.  This is the format used by the TPCH benchmark.<BR>
+We are actively working on adding csv and parquet support.
 
 Datasource compatibilty
 ========================
-In the case of S3, this data source is compatible with the
-S3 server included here:
-https://github.com/futurewei-cloud/caerus-dikeCS
+In the case of S3, this data source is AWS S3 compatible.
+It is also compatible with the S3 server included here:<BR>
+https://github.com/open-infrastructure-labs/caerus-dikeCS
 
 In the case of HDFS, this data source is compatible with the
-HDFS server with proxy configuration located here:
-https://github.com/futurewei-cloud/caerus-dikeHDFS
+HDFS server with proxy configuration located here:<BR>
+https://github.com/open-infrastructure-labs/caerus-dikeHDFS
 
 Credits
 ========
-We based some of the code on minio's spark select.
+We based some of the initial S3 code on minio's spark select.<BR>
 https://github.com/minio/spark-select
 
