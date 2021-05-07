@@ -51,8 +51,6 @@ class HdfsScan(schema: StructType,
 
   override def toBatch: Batch = this
 
-  // The default for hdfs is to use column names for now.
-  options.put("useColumnNames", "")
   protected val pushdown = new Pushdown(schema, prunedSchema, filters,
                                         pushedAggregation, options)
 

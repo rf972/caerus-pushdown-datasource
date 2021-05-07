@@ -26,7 +26,7 @@ package com.github.datasource.common
 
 import java.sql.{Date, Timestamp}
 import java.util
-import java.util.{Locale, StringTokenizer}
+import java.util.{HashMap, Locale, StringTokenizer}
 
 import scala.collection.mutable.ArrayBuilder
 
@@ -74,7 +74,7 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
           case TimestampType => s""""${value.asInstanceOf[Timestamp]}""""
           case _ => value.toString
         }
-        s"s." + s""""${getColString(attr)}"""" + s" $comparisonOp $sqlEscapedValue"
+        s"""${getColString(attr)}""" + s" $comparisonOp $sqlEscapedValue"
       }
     }
     def buildOr(leftFilter: Option[String], rightFilter: Option[String]): Option[String] = {
@@ -268,7 +268,7 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
   }
 
   def quoteIdentifierGroupBy(colName: String): String = {
-    s""""${getColString(colName)}""""
+    s"${getColString(colName)}"
   }
   private def getGroupByClause(aggregation: Aggregation): String = {
     if (aggregation.groupByExpressions.length > 0) {
@@ -281,15 +281,21 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
 
   /** returns the representation of the column name according to the
    *  current option set.
-   *  @param schema - Schema of table
    *  @param attr - Attribute name
+   *  @param disableCast - true to disable any casting.
    *  @return String - representation of the column name.
    */
-  def getColString(attr: String): String = {
-    if (options.containsKey("useColumnNames")) {
-      s"${attr}"
+  def getColString(attr: String, disableCast: Boolean = false): String = {
+    val colString =
+      if (options.containsKey("useColumnNames")) {
+        s"${attr}"
+      } else {
+        s"_${getSchemaIndex(attr)}"
+      }
+    if (options.containsKey("DisableCasts") || disableCast) {
+      colString
     } else {
-      s"_${getSchemaIndex(attr)}"
+      getColCastString(colString, attr)
     }
   }
 
@@ -307,6 +313,43 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
     }
     -1
   }
+  private val disabledCasts = {
+    val userDisabledCasts: String = {
+      if (options.containsKey("DisabledCasts")) {
+        options.get("DisabledCasts")
+      } else {
+        ""
+      }}
+    s"TIMESTAMP,STRING,${userDisabledCasts}".split(",")
+  }
+  logger.trace(s"disabledCasts ${disabledCasts.mkString(",")}")
+
+  /** returns the representation of the column, cast to a
+   *  specific value.
+   *  @param colString - Representation of column chosen by caller
+   *  @param colName - Name of column in schema
+   *  @return String - representation of the column name.
+   */
+  def getColCastString(colString: String, colName: String): String = {
+    val attrType = getTypeForAttribute(colName).getOrElse(StringType)
+    /* We match the type to the types specified by AWS S3 Select.
+     */
+    val mappedType = attrType match {
+      case _: BooleanType => "BOOL"
+      case _: IntegerType => "INTEGER"
+      case _: LongType => "INTEGER"
+      case _: FloatType => "FLOAT"
+      case _: DoubleType => "NUMERIC"
+      case _: StringType => "STRING"
+      case _: DateType => "TIMESTAMP"
+      case _ => s"UNKNOWN_${attrType}"
+    }
+    if (disabledCasts.contains(mappedType)) {
+      s"${colString}"
+    } else {
+      s"CAST(${colString} as ${mappedType})"
+    }
+  }
 
   /** Returns a string to represent the input query.
    *
@@ -317,7 +360,7 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
     if (readColumns.length > 0) {
       columnList = readColumns
     } else {
-      columnList = readSchema.fields.map(x => s"s." +
+      columnList = readSchema.fields.map(x => s"" +
                                          s""""${getColString(x.name)}"""").mkString(",")
       if (columnList.length == 0) {
         columnList = "*"
@@ -332,8 +375,6 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
     } else {
       retVal = s"SELECT $columnList FROM $objectClause s $whereClause $groupByClause"
     }
-    logger.info(s"SQL Query partition: ${partition.toString}")
-    logger.info(s"SQL Query: ${retVal}")
     retVal
   }
   /** Determines if we can push down this aggregate operation.
@@ -352,6 +393,24 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
       getColumnSchema()
     (columns,
      if (updatedSchema.names.isEmpty) schema else updatedSchema)
+  }
+  /** Returns a Query that is fully readable and does
+   *  not contain any casts or column numbers..
+   *
+   *  @param partition the partition to render this query.
+   *  @return String a string of the query.
+   */
+  def getReadableQuery(partition: PushdownPartition): String = {
+    val optionsCopy = new HashMap[String, String](options)
+    // Set options to render query readable.
+    // Set option to represent columns with names instead of numbers.
+    // Set option to not use casts
+    optionsCopy.put("useColumnNames", "")
+    optionsCopy.put("DisableCasts", "")
+    val pd = new Pushdown(schema, prunedSchema,
+                          filters, aggregation,
+                          optionsCopy)
+    pd.queryFromSchema(partition)
   }
 }
 

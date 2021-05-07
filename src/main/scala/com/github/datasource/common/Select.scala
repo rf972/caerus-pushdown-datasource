@@ -37,6 +37,7 @@ import com.amazonaws.services.s3.model.SelectObjectContentRequest
 import com.amazonaws.services.s3.model.SelectObjectContentResult
 import com.amazonaws.services.s3.model.SSECustomerKey
 import com.github.datasource.s3.S3Partition
+import org.slf4j.LoggerFactory
 
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types._
@@ -45,6 +46,7 @@ import org.apache.spark.sql.types._
  *
  */
 object Select {
+  protected val logger = LoggerFactory.getLogger(getClass)
   private val SERVER_ENCRYPTION_ALGORITHM = s"fs.s3a.server-side-encryption-algorithm"
   private val SERVER_ENCRYPTION_KEY = s"fs.s3a.server-side-encryption.key"
 
@@ -97,9 +99,13 @@ object Select {
     SelectObjectContentRequest = {
 
     new SelectObjectContentRequest() { request =>
+      val query = pushdown.queryFromSchema(partition)
+      logger.info(s"SQL Query partition: ${partition.toString}")
+      logger.info("Query: " + pushdown.getReadableQuery(partition))
+      logger.info(s"SQL Query: ${query}")
       request.setBucketName(partition.bucket)
       request.setKey(partition.key)
-      request.setExpression(pushdown.queryFromSchema(partition))
+      request.setExpression(query)
       request.setExpressionType(ExpressionType.SQL)
 
       /* Temporarily removed hadoopConfiguration: Configuration as a parameter.
@@ -133,9 +139,13 @@ object Select {
     SelectObjectContentRequest = {
 
     new SelectObjectContentRequest() { request =>
+      val query = pushdown.queryFromSchema(partition)
+      logger.info(s"SQL Query partition: ${partition.toString}")
+      logger.info("Query: " + pushdown.getReadableQuery(partition))
+      logger.info(s"SQL Query: ${query}")
       request.setBucketName(partition.bucket)
       request.setKey(partition.key)
-      request.setExpression(pushdown.queryFromSchema(partition))
+      request.setExpression(query)
       request.setExpressionType(ExpressionType.SQL)
 
       /* Temporarily removed hadoopConfiguration: Configuration as a parameter.
@@ -171,9 +181,13 @@ object Select {
   def requestCSV(pushdown: Pushdown, partition: S3Partition):
                  SelectObjectContentRequest = {
     new SelectObjectContentRequest() { request =>
+      val query = pushdown.queryFromSchema(partition)
+      logger.info(s"SQL Query partition: ${partition.toString}")
+      logger.info("Query: " + pushdown.getReadableQuery(partition))
+      logger.info(s"SQL Query: ${query}")
       request.setBucketName(partition.bucket)
       request.setKey(partition.key)
-      request.setExpression(pushdown.queryFromSchema(partition))
+      request.setExpression(query)
       request.setExpressionType(ExpressionType.SQL)
 
       /* Disable for now until we get a hadoopConfig

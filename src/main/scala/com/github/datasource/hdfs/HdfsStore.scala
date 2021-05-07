@@ -135,20 +135,22 @@ class HdfsStore(pushdown: Pushdown,
   def getReader(partition: HdfsPartition,
                 startOffset: Long = 0, length: Long = 0): BufferedReader = {
     val filePath = new Path(partition.name)
-    val readParam = {
+    val (readParam, query) = {
       if (!isPushdownNeeded ||
           fileSystemType != "ndphdfs") {
-        ""
+        ("", "")
       } else {
         val (requestQuery, requestSchema) = {
           if (fileSystemType == "ndphdfs") {
+            logger.info("Query: " + pushdown.getReadableQuery(partition))
             (pushdown.queryFromSchema(partition),
             Pushdown.schemaString(pushdown.schema))
           } else {
             ("", "")
           }
         }
-        new ProcessorRequest(requestSchema, requestQuery, partition.length).toXml
+        (new ProcessorRequest(requestSchema, requestQuery, partition.length).toXml,
+         requestQuery)
       }
     }
     /* When we are targeting ndphdfs, but we do not have a pushdown,
@@ -157,6 +159,8 @@ class HdfsStore(pushdown: Pushdown,
      */
     if (isPushdownNeeded &&
         fileSystemType == "ndphdfs") {
+        logger.info(s"SQL Query partition: ${partition.toString}")
+        logger.info(s"SQL Query: ${query}")
         val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
         val inStrm = fs.open(filePath, 4096, readParam).asInstanceOf[FSDataInputStream]
         inStrm.seek(partition.offset)
@@ -226,7 +230,7 @@ class HdfsStore(pushdown: Pushdown,
       // When Processor is disabled, we need to deal with partial lines for ourselves.
       return (partition.offset, partition.length)
     }
-    val currentPath = new Path(filePath)
+    val currentPath = new Path(partition.name)
     var startOffset = partition.offset
     var nextChar: Integer = 0
     if (partition.offset != 0) {
@@ -269,7 +273,8 @@ class HdfsStore(pushdown: Pushdown,
     val (offset, length) = getPartitionInfo(partition)
     RowIteratorFactory.getIterator(getReader(partition, offset, length),
                                    pushdown.readSchema,
-                                   options.get("format"))
+                                   options.get("format"),
+                                   (partition.index == 0 && !isPushdownNeeded))
   }
 }
 
