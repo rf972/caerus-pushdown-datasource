@@ -142,7 +142,7 @@ class HdfsStore(pushdown: Pushdown,
       } else {
         val (requestQuery, requestSchema) = {
           if (fileSystemType == "ndphdfs") {
-            logger.info("Query: " + pushdown.getReadableQuery(partition))
+            logger.info("SQL Query (readable): " + pushdown.getReadableQuery(partition))
             (pushdown.queryFromSchema(partition),
             Pushdown.schemaString(pushdown.schema))
           } else {
