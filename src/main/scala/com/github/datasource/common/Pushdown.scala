@@ -166,7 +166,9 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
      if (sb.length == 0) prunedSchema else updatedSchema)
   }
   private def containsArithmeticOp(col: String): Boolean =
-    col.contains("+") || col.contains("-") || col.contains("*") || col.contains("/")
+    col.contains("+") || col.contains("-") ||
+    col.contains("*") || col.contains("/") ||
+    col.contains("(") || col.contains(")")
 
   /** Returns an array of aggregates translated to strings.
    *
@@ -224,11 +226,10 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
   private def quoteEachCols (column: String): String = {
     def quote(colName: String): String = quoteIdentifier(colName)
     val colsBuilder = ArrayBuilder.make[String]
-    val st = new StringTokenizer(column, "+-*/", true)
+    val st = new StringTokenizer(column, "+-*/()", true)
     colsBuilder += quote(st.nextToken().trim)
     while (st.hasMoreTokens) {
-      colsBuilder += st.nextToken
-      colsBuilder +=  quote(st.nextToken().trim)
+      colsBuilder += quote(st.nextToken().trim)
     }
     colsBuilder.result.mkString(" ")
   }
@@ -286,13 +287,23 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
    *  @return String - representation of the column name.
    */
   def getColString(attr: String, disableCast: Boolean = false): String = {
+    var allowCast = !disableCast
     val colString =
       if (options.containsKey("useColumnNames")) {
         s"${attr}"
       } else {
-        s"_${getSchemaIndex(attr)}"
+        val index = getSchemaIndex(attr)
+        // If the attribute is not recognized, it might
+        // be an operator.  Just allow it to be inserted
+        // as is without any cast.
+        if (index == -1) {
+          allowCast = false
+          attr
+        } else {
+          s"_${index}"
+        }
       }
-    if (options.containsKey("DisableCasts") || disableCast) {
+    if (options.containsKey("DisableCasts") || !allowCast) {
       colString
     } else {
       getColCastString(colString, attr)
@@ -306,7 +317,7 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
    * @return Integer - The index of this field in the input schema.
    */
   def getSchemaIndex(name: String): Integer = {
-    for (i <- 0 to schema.fields.size) {
+    for (i <- 0 to schema.fields.size - 1) {
       if (schema.fields(i).name == name) {
         return i + 1
       }
