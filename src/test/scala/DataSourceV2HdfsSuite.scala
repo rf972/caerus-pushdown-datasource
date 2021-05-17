@@ -37,17 +37,24 @@ class DataSourceV2HdfsSuite extends DataSourceV2Suite {
   /** Initializes a data frame with the sample data and
    *  then writes this dataframe out to hdfs.
    */
-  def initDf(): Unit = {
+  def initDF(): Unit = {
     val s = spark
     import s.implicits._
     val testDF = dataValues.toSeq.toDF("i", "j", "k")
     testDF.select("*").repartition(1)
       .write.mode("overwrite")
-      .option("delimiter", "|")
+      .option("delimiter", ",")
       .format("csv")
-      // .option("header", "true")
+      .option("header", "true")
       .option("partitions", "1")
       .save("hdfs://dikehdfs:9000/integer-test")
+    testDF.select("*").repartition(1)
+      .write.mode("overwrite")
+      .option("delimiter", ",")
+      .format("csv")
+      .option("header", "false")
+      .option("partitions", "1")
+      .save("hdfs://dikehdfs:9000/integer-test-noheader")
   }
   private val dataValues = Seq((0, 5, 1), (1, 10, 2), (2, 5, 1),
                                (3, 10, 2), (4, 5, 1), (5, 10, 2), (6, 5, 1))
@@ -55,9 +62,10 @@ class DataSourceV2HdfsSuite extends DataSourceV2Suite {
    */
   def getData(): String = {
     val sb = new StringBuilder()
+    sb.append("i,j,k\n")
     for (r <- dataValues) {
       r.productIterator.map(_.asInstanceOf[Int])
-       .foreach(i => sb.append(i + "|"))
+       .foreach(i => sb.append(i + ","))
       sb.append("\n")
     }
     sb.substring(0)
@@ -71,7 +79,7 @@ class DataSourceV2HdfsSuite extends DataSourceV2Suite {
 
     val fs = FileSystem.get(URI.create(url), conf);
 
-    val dataPath = new Path("/integer-test/ints.tbl");
+    val dataPath = new Path("/integer-test/ints.csv");
     val fsStrmData = fs.create(dataPath, true);
     val bWriterData = new BufferedWriter(new OutputStreamWriter(fsStrmData,
                                                                 StandardCharsets.UTF_8));
@@ -83,15 +91,28 @@ class DataSourceV2HdfsSuite extends DataSourceV2Suite {
   /** Returns the dataframe for the sample data
    *  read in through the ndp data source.
    */
-  override protected def df() : DataFrame = {
+  override protected def df(): DataFrame = {
     if (!initted) {
-      initHdfs()
+      initDF()
       initted = true
     }
     spark.read
       .format("com.github.datasource")
       .schema(schema)
-      .option("format", "tbl")
-      .load("ndphdfs://dikehdfs/integer-test/ints.tbl")
+      .option("format", "csv")
+      .option("header", "true")
+      .load("ndphdfs://dikehdfs/integer-test/")
+  }
+  override protected def dfNoHeader(): DataFrame = {
+    if (!initted) {
+      initDF()
+      initted = true
+    }
+     spark.read
+      .format("com.github.datasource")
+      .schema(schema)
+      .option("format", "csv")
+      .option("header", "false")
+      .load("ndphdfs://dikehdfs/integer-test-noheader/")
   }
 }

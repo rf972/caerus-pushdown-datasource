@@ -149,7 +149,8 @@ class HdfsStore(pushdown: Pushdown,
             ("", "")
           }
         }
-        (new ProcessorRequest(requestSchema, requestQuery, partition.length).toXml,
+        (new ProcessorRequest(requestSchema, requestQuery, partition.length,
+                              headerType).toXml,
          requestQuery)
       }
     }
@@ -264,6 +265,38 @@ class HdfsStore(pushdown: Pushdown,
     // println(s"partition: ${partition.index} offset: ${startOffset} length: ${partitionLength}")
     (startOffset, partitionLength)
   }
+  /** The kind of header we should use.
+   *  In our case we only ever use None or Ignore, since
+   *  we use casts and column numbers, so the header is not needed.
+   * @return NONE or IGNORE
+   */
+  def headerType(): String = {
+    /* If we do not push down, then we will read from hdfs directly,
+     * and therefor need to skip the header ourselves.
+     * When we use ndp, it skips the header for us since we tell it about the header.
+     */
+    if (options.containsKey("header") && (options.get("header") == "true")) {
+      "IGNORE"
+    } else {
+      "NONE"
+    }
+  }
+  /** Returns true if we should skip the header.
+   *
+   * @param partition the partition to read
+   * @return true to skip the header and false otherwise.
+   */
+  def skipHeader(partition: HdfsPartition): Boolean = {
+    /* If we do not push down, then we will read from hdfs directly,
+     * and therefor need to skip the header ourselves.
+     * When we use ndp, it skips the header for us since we tell it about the header.
+     */
+    if (options.containsKey("header") && (options.get("header") == "true")) {
+      (partition.index == 0 && !isPushdownNeeded)
+    } else {
+      false
+    }
+  }
   /** Returns an Iterator over InternalRow for a given Hdfs partition.
    *
    * @param partition the partition to read
@@ -274,7 +307,7 @@ class HdfsStore(pushdown: Pushdown,
     RowIteratorFactory.getIterator(getReader(partition, offset, length),
                                    pushdown.readSchema,
                                    options.get("format"),
-                                   (partition.index == 0 && !isPushdownNeeded))
+                                   skipHeader(partition))
   }
 }
 

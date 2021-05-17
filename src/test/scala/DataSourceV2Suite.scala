@@ -50,11 +50,22 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
    */
   protected def df() : DataFrame
 
+  /** returns a dataframe object, which is to be used for testing of
+   *  each test case in this suite.
+   *  In this case, the data for the DataFrame does not contain a header.
+   *  This can be overloaded in a new suite, which defines
+   *  its own data frame.
+   *
+   * @return DataFrame - The new dataframe object to be used in testing.
+   */
+  protected def dfNoHeader() : DataFrame
+
   override def beforeAll(): Unit = {
     super.beforeAll()
     spark.sparkContext.setLogLevel("WARN")
 
     df.createOrReplaceTempView("integers")
+    dfNoHeader.createOrReplaceTempView("integersNoHeader")
   }
 
   override def afterAll(): Unit = {
@@ -64,6 +75,9 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
     checkAnswer(df, Seq(Row(0, 5, 1), Row(1, 10, 2), Row(2, 5, 1),
                         Row(3, 10, 2), Row(4, 5, 1), Row(5, 10, 2), Row(6, 5, 1)))
     df.show()
+    checkAnswer(dfNoHeader, Seq(Row(0, 5, 1), Row(1, 10, 2), Row(2, 5, 1),
+                            Row(3, 10, 2), Row(4, 5, 1), Row(5, 10, 2), Row(6, 5, 1)))
+    dfNoHeader.show()
   }
   test("simple project") {
     checkAnswer(df.select("i", "j", "k"),
@@ -74,6 +88,28 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
                        Row(3, 10), Row(4, 5), Row(5, 10), Row(6, 5)))
     checkAnswer(df.filter("i >= 5"),
                 Seq(Row(5, 10, 2), Row(6, 5, 1)))
+  }
+  test("no header") {
+    checkAnswer(dfNoHeader.select("i", "j", "k"),
+                Seq(Row(0, 5, 1), Row(1, 10, 2), Row(2, 5, 1),
+                       Row(3, 10, 2), Row(4, 5, 1), Row(5, 10, 2), Row(6, 5, 1)))
+    checkAnswer(dfNoHeader.select("i", "j"),
+                Seq(Row(0, 5), Row(1, 10), Row(2, 5),
+                       Row(3, 10), Row(4, 5), Row(5, 10), Row(6, 5)))
+    checkAnswer(dfNoHeader.filter("i >= 5"),
+                Seq(Row(5, 10, 2), Row(6, 5, 1)))
+    checkAnswer(dfNoHeader.filter("i > 4")
+                  .agg(sum("i") * sum("j")),
+                Seq(Row(165)))
+    checkAnswer(dfNoHeader.agg(sum("j")),
+                Seq(Row(50)))
+    checkAnswer(dfNoHeader.agg(min("k"), max("k")),
+                Seq(Row(1, 2)))
+    checkAnswer(sql("SELECT count(*) FROM integersNoHeader"),
+                Seq(Row(7)))
+    checkAnswer(sql("SELECT sum(k + j) FROM integersNoHeader WHERE i > 1" +
+                    " GROUP BY j"),
+                Seq(Row(18), Row(24)))
   }
   test("basic aggregate") {
     checkAnswer(df.filter("i > 4")
@@ -125,7 +161,7 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   }
   test ("aggregate with expressions") {
 
-    checkAnswer(sql("SELECT sum(k * j) FROM integers WHERE i > 1" +
+    checkAnswer(sql("SELECT sum(k * j) AS prod_kj FROM integers WHERE i > 1" +
                     " GROUP BY j"),
                 Seq(Row(15), Row(40)))
     checkAnswer(sql("SELECT j, sum(k * j) FROM integers WHERE i > 1" +

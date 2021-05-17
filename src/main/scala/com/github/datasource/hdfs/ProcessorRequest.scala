@@ -28,10 +28,13 @@ import org.apache.spark.sql.connector.read.InputPartition
  *
  * @param schema the representation of the column data
  * @param query the SQL operation to perform or empty string if none.
+ * @param blockSize the length in bytes of the blocks we are reading.
+ * @param header the type of header (NONE, IGNORE, SKIP).
  */
 class ProcessorRequest(schema: String,
                        query: String,
-                       blockSize: Long) {
+                       blockSize: Long,
+                       header: String) {
 
     def toXml : String = {
         val root = <Processor>
@@ -41,6 +44,7 @@ class ProcessorRequest(schema: String,
                        <Schema>{schema}</Schema>
                        <Query>{scala.xml.PCData(query)}</Query>
                        <BlockSize>{blockSize}</BlockSize>
+                       <headerInfo>{header}</headerInfo>
                        <FieldDelimiter>{','.toInt}</FieldDelimiter>
                        <RowDelimiter>{'\n'.toInt}</RowDelimiter>
                        <QuoteDelimiter>{'"'.toInt}</QuoteDelimiter>
