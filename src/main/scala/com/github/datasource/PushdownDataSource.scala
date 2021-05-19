@@ -61,7 +61,7 @@ class DefaultSource extends TableProvider
   override def keyPrefix(): String = {
     "pushdown"
   }
-  override def shortName(): String = "pushdownDatasource"
+  override def shortName(): String = "pushdown"
 }
 
 /** Creates a Table object that supports pushdown predicates

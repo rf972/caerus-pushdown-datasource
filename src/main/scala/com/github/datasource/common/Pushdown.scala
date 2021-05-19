@@ -74,7 +74,7 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
           case TimestampType => s""""${value.asInstanceOf[Timestamp]}""""
           case _ => value.toString
         }
-        s"""${getColString(attr)}""" + s" $comparisonOp $sqlEscapedValue"
+        s"${getColString(attr)}" + s" $comparisonOp $sqlEscapedValue"
       }
     }
     def buildOr(leftFilter: Option[String], rightFilter: Option[String]): Option[String] = {
@@ -350,6 +350,7 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
       case _: IntegerType => "INTEGER"
       case _: LongType => "INTEGER"
       case _: FloatType => "FLOAT"
+      case _: DecimalType => "NUMERIC"
       case _: DoubleType => "NUMERIC"
       case _: StringType => "STRING"
       case _: DateType => "TIMESTAMP"
@@ -372,7 +373,7 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
       columnList = readColumns
     } else {
       columnList = readSchema.fields.map(x => s"" +
-                                         s""""${getColString(x.name)}"""").mkString(",")
+                                         s"${getColString(x.name)}").mkString(",")
       if (columnList.length == 0) {
         columnList = "*"
       }

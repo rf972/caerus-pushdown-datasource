@@ -31,6 +31,7 @@ import com.amazonaws.services.s3.model.JSONInput
 import com.amazonaws.services.s3.model.JSONType
 import com.amazonaws.services.s3.model.OutputSerialization
 import com.amazonaws.services.s3.model.ParquetInput
+import com.amazonaws.services.s3.model.ScanRange
 import com.amazonaws.services.s3.model.SelectObjectContentEvent
 import com.amazonaws.services.s3.model.SelectObjectContentEvent.RecordsEvent
 import com.amazonaws.services.s3.model.SelectObjectContentRequest
@@ -189,6 +190,10 @@ object Select {
       request.setKey(partition.key)
       request.setExpression(query)
       request.setExpressionType(ExpressionType.SQL)
+
+      var scanRange = new ScanRange().withStart(partition.offsetBytes)
+                                     .withEnd(partition.getEnd)
+      request.setScanRange(scanRange)
 
       /* Disable for now until we get a hadoopConfig
       val algo = hadoopConfiguration.get(SERVER_ENCRYPTION_ALGORITHM, null)

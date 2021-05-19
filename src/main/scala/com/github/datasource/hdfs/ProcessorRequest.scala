@@ -44,7 +44,7 @@ class ProcessorRequest(schema: String,
                        <Schema>{schema}</Schema>
                        <Query>{scala.xml.PCData(query)}</Query>
                        <BlockSize>{blockSize}</BlockSize>
-                       <headerInfo>{header}</headerInfo>
+                       <HeaderInfo>{header}</HeaderInfo>
                        <FieldDelimiter>{','.toInt}</FieldDelimiter>
                        <RowDelimiter>{'\n'.toInt}</RowDelimiter>
                        <QuoteDelimiter>{'"'.toInt}</QuoteDelimiter>

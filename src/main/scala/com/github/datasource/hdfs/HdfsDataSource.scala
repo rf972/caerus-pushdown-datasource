@@ -25,6 +25,9 @@ import com.github.datasource.common.Pushdown
 import org.apache.hadoop.fs.BlockLocation
 import org.slf4j.LoggerFactory
 
+import org.apache.spark.TaskContext
+import org.apache.spark.scheduler._
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.sources._
@@ -133,7 +136,9 @@ class HdfsPartitionReader(pushdown: Pushdown,
   extends PartitionReader[InternalRow] {
 
   private val logger = LoggerFactory.getLogger(getClass)
-
+  val tc = TaskContext.get()
+  logger.info(s"Task id: ${tc.taskAttemptId()} Stage id: ${tc.stageId} " +
+              s"Partition: ${partition.index}:${partition.name}")
   /* We setup a rowIterator and then read/parse
    * each row as it is asked for.
    */

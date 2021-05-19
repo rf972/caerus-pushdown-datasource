@@ -178,7 +178,9 @@ abstract class S3Store(pushdown: Pushdown,
       .withCommentMarker(params.getOrElse(s"comment", "#").charAt(0))
 
     req.withBucketName(s3URI.getBucket())
-    req.withPrefix(s3URI.getKey().stripSuffix("*"))
+    if (s3URI.getKey() != null) {
+      req.withPrefix(s3URI.getKey().stripSuffix("*"))
+    }
     req.withMaxKeys(1000)
 
     var rows : Int = 0

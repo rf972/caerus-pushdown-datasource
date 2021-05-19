@@ -25,6 +25,7 @@ import com.amazonaws.services.s3.model.S3ObjectSummary
 import com.github.datasource.common.Pushdown
 import org.slf4j.LoggerFactory
 
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.sources._
@@ -51,8 +52,9 @@ class S3Scan(schema: StructType,
 
   protected val pushdown = new Pushdown(schema, prunedSchema, filters,
                                       pushedAggregation, options)
-
-  private val maxPartSize: Long = (1024 * 1024 * 128)
+  private val spark = SparkSession.builder()
+                                  .getOrCreate()
+  private val maxPartBytes: Long = spark.sessionState.conf.filesMaxPartitionBytes
   private var partitions: Array[InputPartition] = getPartitions()
 
   private def generateFilePartitions(objectSummary : S3ObjectSummary): Array[InputPartition] = {
@@ -62,38 +64,36 @@ class S3Scan(schema: StructType,
           options.get("partitions").toInt != 0) {
         options.get("partitions").toInt
       } else {
-        // We previously supported a number of partitions per file
-        // However, this is only supportable via use of the OFFSET
-        // phrase, which is not part of the AWS S3 standard.
-        // For now, assume a single partition per file.
-        // (objectSummary.getSize() / maxPartSize +
-        // (if ((objectSummary.getSize() % maxPartSize) == 0) 0 else 1)).toInt
-        1
+        // Support a number of partitions when the size of the file is
+        // larger than maxPartBytes.  In this case, each partition is maxPartBytes, and
+        // the last partition is the remaining bytes.
+        ( (objectSummary.getSize() / maxPartBytes) +
+         (if ((objectSummary.getSize() % maxPartBytes) == 0) 0 else 1)).toInt
       }
     if (numPartitions == 0) {
       throw new ArithmeticException("numPartitions is 0")
     }
-    var totalRows = if (numPartitions == 1) 0 else store.getNumRows()
-    val partitionRows = totalRows / numPartitions
     var partitionArray = new ArrayBuffer[InputPartition](0)
+    var offsetBytes: Long = 0
     logger.debug(s"""Num Partitions ${numPartitions}""")
     for (i <- 0 to (numPartitions - 1)) {
-      val rows = {
-        if (i == numPartitions - 1) {
-          totalRows - (i * partitionRows)
+      val lengthBytes = {
+        if ((objectSummary.getSize() - offsetBytes) > maxPartBytes) {
+          maxPartBytes
         }
         else {
-          partitionRows
+          objectSummary.getSize() - offsetBytes
         }
       }
       val nextPart = new S3Partition(index = i,
-                                     rowOffset = i * partitionRows,
-                                     numRows = rows,
+                                     offsetBytes = offsetBytes,
+                                     lengthBytes = lengthBytes,
                                      onlyPartition = (numPartitions == 1),
                                      bucket = objectSummary.getBucketName(),
                                      key = objectSummary.getKey()).asInstanceOf[InputPartition]
       partitionArray += nextPart
-      // logger.info(nextPart.toString)
+      offsetBytes += lengthBytes
+      logger.info(nextPart.toString)
     }
     partitionArray.toArray
   }
@@ -169,8 +169,12 @@ class S3PartitionReader(pushdown: Pushdown,
    */
   private var store: S3Store = S3StoreFactory.getS3Store(pushdown, options)
   private var rowIterator: Iterator[InternalRow] = store.getRowIter(partition)
-
-  var index = 0
+  private var rows: Long = if (options.containsKey("EnableProgress")) {
+    store.getNumRows
+  } else {
+    Long.MaxValue
+  }
+  var index: Long = 0
   def next: Boolean = {
     rowIterator.hasNext
   }
@@ -178,8 +182,17 @@ class S3PartitionReader(pushdown: Pushdown,
     val row = rowIterator.next
     if (((index % 500000) == 0) ||
         (!next)) {
+      val pct: String = {
+        if (rows == Long.MaxValue ||
+            rows == 0) {
+          ""
+        } else {
+          val percentage = ((index * 100.toDouble) / rows.toDouble)
+          "%.2f".format(percentage).toDouble.toString + " %"
+        }
+      }
       logger.info(s"""get: partition: ${partition.index} ${partition.bucket} """ +
-                  s"""${partition.key} index: ${index}""")
+                  s"""${partition.key} index: ${index}/${rows} ${pct}""")
     }
     index = index + 1
     row
