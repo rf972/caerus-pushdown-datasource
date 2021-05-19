@@ -188,11 +188,11 @@ class S3PartitionReader(pushdown: Pushdown,
           ""
         } else {
           val percentage = ((index * 100.toDouble) / rows.toDouble)
-          "%.2f".format(percentage).toDouble.toString + " %"
+          s"/${rows} " + "%.2f".format(percentage).toDouble.toString + " %"
         }
       }
-      logger.info(s"""get: partition: ${partition.index} ${partition.bucket} """ +
-                  s"""${partition.key} index: ${index}/${rows} ${pct}""")
+      logger.info(s"get: partition: ${partition.index} ${partition.bucket} " +
+                  s"${partition.key} index: ${index}${pct}")
     }
     index = index + 1
     row
