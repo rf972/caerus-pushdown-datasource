@@ -30,14 +30,14 @@ class DataSourceV2S3Suite extends DataSourceV2Suite {
       .schema(schema)
       .option("format", "csv")
       .option("header", "true")
-      .load("s3a://spark-test/integer-test/")
+      .load("s3a://integer-test/")
   }
   override protected def dfNoHeader() : DataFrame = {
     spark.read
-      .format("com.github.datasource")
+      .format("pushdown")
       .schema(schema)
       .option("format", "csv")
       .option("header", "false")
-      .load("s3a://spark-test/integer-test-noheader/")
+      .load("s3a://integer-test-noheader/")
   }
 }

@@ -30,9 +30,9 @@ import org.apache.spark.sql.types._
  */
 abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   import testImplicits._
-  private val s3IpAddr = "minioserver"
+  private val s3IpAddr = "dikehdfs"
   override def sparkConf: SparkConf = super.sparkConf
-      .set("spark.datasource.pushdown.endpoint", s"""http://$s3IpAddr:9000""")
+      .set("spark.datasource.pushdown.endpoint", s"http://$s3IpAddr:9858")
       .set("spark.datasource.pushdown.accessKey", "admin")
       .set("spark.datasource.pushdown.secretKey", "admin123")
 
@@ -50,6 +50,30 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
    */
   protected def df() : DataFrame
 
+  /** Initializes a data frame with the sample data and
+   *  then writes this dataframe out to hdfs.
+   */
+  protected def initData(): Unit = {
+    val s = spark
+    import s.implicits._
+    val testDF = dataValues.toSeq.toDF("i", "j", "k")
+    testDF.select("*").repartition(1)
+      .write.mode("overwrite")
+      .option("delimiter", ",")
+      .format("csv")
+      .option("header", "true")
+      .option("partitions", "1")
+      .save("hdfs://dikehdfs:9000/integer-test")
+    testDF.select("*").repartition(1)
+      .write.mode("overwrite")
+      .option("delimiter", ",")
+      .format("csv")
+      .option("header", "false")
+      .option("partitions", "1")
+      .save("hdfs://dikehdfs:9000/integer-test-noheader")
+  }
+  private val dataValues = Seq((0, 5, 1), (1, 10, 2), (2, 5, 1),
+                               (3, 10, 2), (4, 5, 1), (5, 10, 2), (6, 5, 1))
   /** returns a dataframe object, which is to be used for testing of
    *  each test case in this suite.
    *  In this case, the data for the DataFrame does not contain a header.
@@ -63,7 +87,7 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   override def beforeAll(): Unit = {
     super.beforeAll()
     spark.sparkContext.setLogLevel("WARN")
-
+    initData()
     df.createOrReplaceTempView("integers")
     dfNoHeader.createOrReplaceTempView("integersNoHeader")
   }
@@ -74,9 +98,9 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   test("simple scan") {
     checkAnswer(df, Seq(Row(0, 5, 1), Row(1, 10, 2), Row(2, 5, 1),
                         Row(3, 10, 2), Row(4, 5, 1), Row(5, 10, 2), Row(6, 5, 1)))
-    df.show()
     checkAnswer(dfNoHeader, Seq(Row(0, 5, 1), Row(1, 10, 2), Row(2, 5, 1),
                             Row(3, 10, 2), Row(4, 5, 1), Row(5, 10, 2), Row(6, 5, 1)))
+    df.show()
     dfNoHeader.show()
   }
   test("simple project") {
@@ -235,3 +259,6 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
                 Seq(Row(7)))
   }
 }
+// testOnly com.github.datasource.test.DataSourceV2HdfsSuite
+// testOnly com.github.datasource.test.DataSourceV2S3Suite
+// testOnly com.github.datasource.test.DataSourceV2HdfsSuite -- -z "no header"
