@@ -17,6 +17,7 @@
 package com.github.datasource
 
 import java.util
+import java.util.HashMap
 
 import scala.collection.JavaConverters._
 
@@ -43,7 +44,6 @@ class DefaultSource extends TableProvider
   with SessionConfigSupport with DataSourceRegister {
 
   private val logger = LoggerFactory.getLogger(getClass)
-  logger.trace("Pushdown Data Source Created")
   override def toString: String = s"PushdownDataSource()"
   override def supportsExternalMetadata(): Boolean = true
 
@@ -61,7 +61,7 @@ class DefaultSource extends TableProvider
   override def keyPrefix(): String = {
     "pushdown"
   }
-  override def shortName(): String = "pushdownDatasource"
+  override def shortName(): String = "pushdown"
 }
 
 /** Creates a Table object that supports pushdown predicates
@@ -107,15 +107,16 @@ class PushdownScanBuilder(schema: StructType,
   var pushedFilter: Array[Filter] = new Array[Filter](0)
   private var prunedSchema: StructType = schema
   private var pushedAggregations = Aggregation(Seq.empty[AggregateFunc], Seq.empty[String])
-
-  logger.trace("Created")
-
   /** Returns a scan object for this particular query.
    *   Currently we only support S3 and Hdfs.
    *
    * @return the scan object either a S3Scan or HdfsScan
    */
   override def build(): Scan = {
+    /* Make the map modifiable.
+     * The objects below can override defaults.
+     */
+    val opt: util.Map[String, String] = new HashMap[String, String](options)
     if (options.get("path").contains("s3a")) {
       new S3Scan(schema, options,
                  pushedFilter, prunedSchema, pushedAggregations)
@@ -123,7 +124,7 @@ class PushdownScanBuilder(schema: StructType,
       if (!options.get("path").contains("hdfs")) {
         throw new Exception(s"endpoint ${options.get("endpoint")} is unexpected")
       }
-      new HdfsScan(schema, options,
+      new HdfsScan(schema, opt,
                    pushedFilter, prunedSchema, pushedAggregations)
     }
   }
@@ -168,7 +169,9 @@ class PushdownScanBuilder(schema: StructType,
     if (!pushdownSupported() || options.containsKey("DisableFilterPush")) {
       filters
     } else {
-      val f = filters.map(f => Pushdown.buildFilterExpression(schema, f))
+    val pushdown = new Pushdown(schema, prunedSchema, pushedFilter,
+                                pushedAggregations, options)
+      val f = filters.map(f => pushdown.buildFilterExpression(f))
       logger.trace("compiled filter list: " + f.mkString(", "))
       if (!f.contains(None)) {
         pushedFilter = filters
@@ -181,11 +184,6 @@ class PushdownScanBuilder(schema: StructType,
       }
     }
   }
-  def aggregatePushdownValid(aggregation: Aggregation): Boolean = {
-    val (compiledAgg, aggDataType) =
-      Pushdown.compileAggregates(aggregation.aggregateExpressions)
-    (compiledAgg.isEmpty == false)
-  }
   /** Will push down a list of aggregates to be saved and sent to
    *  the endpoint on all reads.
    *  Note that "DisableAggregatePush" option will prevent any pushes.
@@ -193,12 +191,16 @@ class PushdownScanBuilder(schema: StructType,
    *                    these are "and" separated.
    */
   override def pushAggregation(aggregation: Aggregation): Unit = {
+    val pushdown = new Pushdown(schema, prunedSchema, pushedFilter,
+                                aggregation, options)
     if (pushdownSupported() &&
-        !options.containsKey("DisableAggregatePush") &&
-        aggregatePushdownValid(aggregation)) {
-      pushedAggregations = aggregation
+        !options.containsKey("DisableAggregatePush")) {
+      if (pushdown.aggregatePushdownValid()) {
+        pushedAggregations = aggregation
+      } else {
+        logger.info(s"Aggregate not pushed down: " + aggregation)
+      }
     }
   }
-
   override def pushedAggregation(): Aggregation = pushedAggregations
 }

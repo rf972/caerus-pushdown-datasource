@@ -22,8 +22,10 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable.{ArrayBuffer}
 
 import com.amazonaws.services.s3.model.S3ObjectSummary
+import com.github.datasource.common.Pushdown
 import org.slf4j.LoggerFactory
 
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.sources._
@@ -48,45 +50,50 @@ class S3Scan(schema: StructType,
 
   override def toBatch: Batch = this
 
-  private val maxPartSize: Long = (1024 * 1024 * 128)
+  protected val pushdown = new Pushdown(schema, prunedSchema, filters,
+                                      pushedAggregation, options)
+  private val spark = SparkSession.builder()
+                                  .getOrCreate()
+  private val maxPartBytes: Long = spark.sessionState.conf.filesMaxPartitionBytes
   private var partitions: Array[InputPartition] = getPartitions()
 
   private def generateFilePartitions(objectSummary : S3ObjectSummary): Array[InputPartition] = {
-    var store: S3Store = S3StoreFactory.getS3Store(schema, options,
-                                                   filters, prunedSchema,
-                                                   pushedAggregation)
+    var store: S3Store = S3StoreFactory.getS3Store(pushdown, options)
     var numPartitions: Int =
       if (options.containsKey("partitions") &&
           options.get("partitions").toInt != 0) {
         options.get("partitions").toInt
       } else {
-        (objectSummary.getSize() / maxPartSize +
-        (if ((objectSummary.getSize() % maxPartSize) == 0) 0 else 1)).toInt
+        // Support a number of partitions when the size of the file is
+        // larger than maxPartBytes.  In this case, each partition is maxPartBytes, and
+        // the last partition is the remaining bytes.
+        ( (objectSummary.getSize() / maxPartBytes) +
+         (if ((objectSummary.getSize() % maxPartBytes) == 0) 0 else 1)).toInt
       }
     if (numPartitions == 0) {
       throw new ArithmeticException("numPartitions is 0")
     }
-    var totalRows = if (numPartitions == 1) 0 else store.getNumRows()
-    val partitionRows = totalRows / numPartitions
     var partitionArray = new ArrayBuffer[InputPartition](0)
+    var offsetBytes: Long = 0
     logger.debug(s"""Num Partitions ${numPartitions}""")
     for (i <- 0 to (numPartitions - 1)) {
-      val rows = {
-        if (i == numPartitions - 1) {
-          totalRows - (i * partitionRows)
+      val lengthBytes = {
+        if ((objectSummary.getSize() - offsetBytes) > maxPartBytes) {
+          maxPartBytes
         }
         else {
-          partitionRows
+          objectSummary.getSize() - offsetBytes
         }
       }
       val nextPart = new S3Partition(index = i,
-                                     rowOffset = i * partitionRows,
-                                     numRows = rows,
+                                     offsetBytes = offsetBytes,
+                                     lengthBytes = lengthBytes,
                                      onlyPartition = (numPartitions == 1),
                                      bucket = objectSummary.getBucketName(),
                                      key = objectSummary.getKey()).asInstanceOf[InputPartition]
       partitionArray += nextPart
-      // logger.info(nextPart.toString)
+      offsetBytes += lengthBytes
+      logger.info(nextPart.toString)
     }
     partitionArray.toArray
   }
@@ -112,9 +119,7 @@ class S3Scan(schema: StructType,
    * @return array of S3Partitions
    */
   private def getPartitions(): Array[InputPartition] = {
-    var store: S3Store = S3StoreFactory.getS3Store(schema, options, filters,
-                                                   prunedSchema,
-                                                   pushedAggregation)
+    var store: S3Store = S3StoreFactory.getS3Store(pushdown, options)
     val objectSummaries : Array[S3ObjectSummary] = store.getObjectSummaries()
 
     // If there is only one file, we will partition it as needed automatically.
@@ -130,48 +135,31 @@ class S3Scan(schema: StructType,
     partitions
   }
   override def createReaderFactory(): PartitionReaderFactory =
-          new S3PartitionReaderFactory(schema, options, filters,
-                                       prunedSchema,
-                                       pushedAggregation)
+          new S3PartitionReaderFactory(pushdown, options)
 }
 
 /** Creates a factory for creating S3PartitionReader objects
  *
- * @param schema the column format
+ * @param pushdown object handling filter, project and aggregate pushdown
  * @param options the options including "path"
- * @param filters the array of filters to push down
- * @param prunedSchema the new array of columns after pruning
- * @param pushedAggregation the array of aggregations to push down
  */
-class S3PartitionReaderFactory(schema: StructType,
-                               options: util.Map[String, String],
-                               filters: Array[Filter],
-                               prunedSchema: StructType,
-                               pushedAggregation: Aggregation)
+class S3PartitionReaderFactory(pushdown: Pushdown,
+                               options: util.Map[String, String])
   extends PartitionReaderFactory {
   private val logger = LoggerFactory.getLogger(getClass)
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
-    new S3PartitionReader(schema, options, filters,
-                          prunedSchema, partition.asInstanceOf[S3Partition],
-                          pushedAggregation)
+    new S3PartitionReader(pushdown, options, partition.asInstanceOf[S3Partition])
   }
 }
 
 /** PartitionReader of S3Partitions
  *
- * @param schema the column format
+ * @param pushdown object handling filter, project and aggregate pushdown
  * @param options the options including "path"
- * @param filters the array of filters to push down
- * @param prunedSchema the new array of columns after pruning
- * @param partition the S3Partition to read from
- * @param pushedAggregation the array of aggregations to push down
  */
-class S3PartitionReader(schema: StructType,
+class S3PartitionReader(pushdown: Pushdown,
                         options: util.Map[String, String],
-                        filters: Array[Filter],
-                        prunedSchema: StructType,
-                        partition: S3Partition,
-                        pushedAggregation: Aggregation)
+                        partition: S3Partition)
   extends PartitionReader[InternalRow] {
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -179,12 +167,14 @@ class S3PartitionReader(schema: StructType,
   /* We setup a rowIterator and then read/parse
    * each row as it is asked for.
    */
-  private var store: S3Store = S3StoreFactory.getS3Store(schema, options,
-                                                         filters, prunedSchema,
-                                                         pushedAggregation)
+  private var store: S3Store = S3StoreFactory.getS3Store(pushdown, options)
   private var rowIterator: Iterator[InternalRow] = store.getRowIter(partition)
-
-  var index = 0
+  private var rows: Long = if (options.containsKey("EnableProgress")) {
+    store.getNumRows
+  } else {
+    Long.MaxValue
+  }
+  var index: Long = 0
   def next: Boolean = {
     rowIterator.hasNext
   }
@@ -192,8 +182,17 @@ class S3PartitionReader(schema: StructType,
     val row = rowIterator.next
     if (((index % 500000) == 0) ||
         (!next)) {
-      logger.info(s"""get: partition: ${partition.index} ${partition.bucket} """ +
-                  s"""${partition.key} index: ${index}""")
+      val pct: String = {
+        if (rows == Long.MaxValue ||
+            rows == 0) {
+          ""
+        } else {
+          val percentage = ((index * 100.toDouble) / rows.toDouble)
+          s"/${rows} " + "%.2f".format(percentage).toDouble.toString + " %"
+        }
+      }
+      logger.info(s"get: partition: ${partition.index} ${partition.bucket} " +
+                  s"${partition.key} index: ${index}${pct}")
     }
     index = index + 1
     row

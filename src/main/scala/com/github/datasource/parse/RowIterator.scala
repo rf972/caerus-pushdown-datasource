@@ -54,14 +54,16 @@ object RowIteratorFactory {
    * @param schema the StructType schema to construct store with.
    * @param params the parameters including those to construct the store
    * @param rowReader the BufferedReader that has the
+   * @param skipHeader true to skip the header row.
    * @return a new Iterator of InternalRow constructed with above parameters.
    */
   def getIterator(rowReader: BufferedReader,
                   schema: StructType,
-                  format: String): Iterator[InternalRow] = {
+                  format: String,
+                  skipHeader: Boolean = false): Iterator[InternalRow] = {
     format.toLowerCase(Locale.ROOT) match {
-      case "csv" => new RowIterator(rowReader, schema, new Delimiters(','))
-      case "tbl" => new RowIterator(rowReader, schema, new Delimiters('|'))
+      case "csv" => new RowIterator(rowReader, schema, new Delimiters(','), skipHeader)
+      case "tbl" => new RowIterator(rowReader, schema, new Delimiters('|'), skipHeader)
     }
   }
 }
@@ -74,7 +76,8 @@ object RowIteratorFactory {
  */
 class RowIterator(rowReader: BufferedReader,
                   schema: StructType,
-                  delim: Delimiters)
+                  delim: Delimiters,
+                  skipHeader: Boolean)
   extends Iterator[InternalRow] {
   private val logger = LoggerFactory.getLogger(getClass)
   /** Returns an InternalRow parsed from the input line.
@@ -89,6 +92,7 @@ class RowIterator(rowReader: BufferedReader,
     if (delim.fieldDelim != '|') {
       var value: String = ""
       var fieldStart = 0
+      // logger.info(s"line: ${line}")
       while (index < schema.fields.length && fieldStart < line.length) {
         if (line(fieldStart) != delim.quoteDelim) {
           var fieldEnd = line.substring(fieldStart).indexOf(delim.fieldDelim)
@@ -128,7 +132,7 @@ class RowIterator(rowReader: BufferedReader,
       }
     }
     if (index >= schema.fields.length) {
-      // println(row.toString)
+      // logger.info("row: " + row.mkString(", "))
       new GenericInternalRow(row)
     } else {
       /* If empty, we will simply discard the row since
@@ -163,6 +167,12 @@ class RowIterator(rowReader: BufferedReader,
    * @return InternalRow for the next row.
    */
   private var nextRow: InternalRow = {
+    if (skipHeader) {
+      var discard = ""
+      if ({discard = rowReader.readLine(); (discard != null)}) {
+        logger.info("Discarding row:" + discard)
+      }
+    }
     val firstRow = getNextRow()
     firstRow
   }

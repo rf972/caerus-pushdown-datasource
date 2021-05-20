@@ -55,49 +55,35 @@ import org.apache.spark.sql.types._
 object HdfsStoreFactory {
   /** Returns the store object.
    *
-   * @param schema the StructType schema to construct store with.
-   * @param params the parameters including those to construct the store
-   * @param filters the filters to pass down to the store.
-   * @param prunedSchema the schema to pushdown (column pruning)
-   * @param pushedAggregation the aggregate operations to pushdown
+   * @param pushdown object handling filter, project and aggregate pushdown
+   * @param options the parameters including those to construct the store
    * @return a new HdfsStore object constructed with above parameters.
    */
-  def getStore(schema: StructType,
-               params: java.util.Map[String, String],
-               filters: Array[Filter],
-               prunedSchema: StructType,
-               pushedAggregation: Aggregation): HdfsStore = {
-    new HdfsStore(schema, params, filters, prunedSchema,
-                  pushedAggregation)
+  def getStore(pushdown: Pushdown,
+               options: java.util.Map[String, String]): HdfsStore = {
+    new HdfsStore(pushdown, options)
   }
 }
 /** A hdfs store object which can connect
- *  to a file on hdfs filesystem, specified by params("path"),
+ *  to a file on hdfs filesystem, specified by options("path"),
  *  And which can read a partition with any of various pushdowns.
  *
- * @param schema the StructType schema to construct store with.
- * @param params the parameters including those to construct the store
- * @param filters the filters to pass down to the store.
- * @param prunedSchema the schema to pushdown (column pruning)
- * @param pushedAggregation the aggregate operations to pushdown
+ * @param pushdown object handling filter, project and aggregate pushdown
+ * @param options the parameters including those to construct the store
  */
-class HdfsStore(schema: StructType,
-                params: java.util.Map[String, String],
-                filters: Array[Filter],
-                prunedSchema: StructType,
-                pushedAggregation: Aggregation) {
-
-  override def toString() : String = "HdfsStore" + params + filters.mkString(", ")
-  protected val path = params.get("path")
+class HdfsStore(pushdown: Pushdown,
+                options: java.util.Map[String, String]) {
+  override def toString() : String = "HdfsStore" + options + pushdown.filters.mkString(", ")
+  protected val path = options.get("path")
   protected val isPushdownNeeded: Boolean = {
     /* Determines if we should send the pushdown to ndp.
      * If any of the pushdowns are in use (project, filter, aggregate),
      * then we will consider that pushdown is needed.
      */
-    ((prunedSchema.length != schema.length) ||
-     (filters.length > 0) ||
-     (pushedAggregation.aggregateExpressions.length > 0) ||
-     (pushedAggregation.groupByExpressions.length > 0))
+    ((pushdown.prunedSchema.length != pushdown.schema.length) ||
+     (pushdown.filters.length > 0) ||
+     (pushdown.aggregation.aggregateExpressions.length > 0) ||
+     (pushdown.aggregation.groupByExpressions.length > 0))
   }
   protected val endpoint = {
     val server = path.split("/")(2)
@@ -121,13 +107,6 @@ class HdfsStore(schema: StructType,
     }
   }
   protected val logger = LoggerFactory.getLogger(getClass)
-  protected val (readColumns: String,
-                 readSchema: StructType) = {
-    var (columns, updatedSchema) =
-      Pushdown.getColumnSchema(pushedAggregation, prunedSchema)
-    (columns,
-     if (updatedSchema.names.isEmpty) schema else updatedSchema)
-  }
   protected val fileSystem = {
     val conf = new Configuration()
     conf.set("dfs.datanode.drop.cache.behind.reads", "true")
@@ -156,21 +135,23 @@ class HdfsStore(schema: StructType,
   def getReader(partition: HdfsPartition,
                 startOffset: Long = 0, length: Long = 0): BufferedReader = {
     val filePath = new Path(partition.name)
-    val readParam = {
+    val (readParam, query) = {
       if (!isPushdownNeeded ||
           fileSystemType != "ndphdfs") {
-        ""
+        ("", "")
       } else {
         val (requestQuery, requestSchema) = {
           if (fileSystemType == "ndphdfs") {
-            (Pushdown.queryFromSchema(schema, readSchema, readColumns,
-                                      filters, pushedAggregation, partition),
-            Pushdown.schemaString(schema))
+            logger.info("SQL Query (readable): " + pushdown.getReadableQuery(partition))
+            (pushdown.queryFromSchema(partition),
+            Pushdown.schemaString(pushdown.schema))
           } else {
             ("", "")
           }
         }
-        new ProcessorRequest(requestSchema, requestQuery, partition.length).toXml
+        (new ProcessorRequest(requestSchema, requestQuery, partition.length,
+                              headerType).toXml,
+         requestQuery)
       }
     }
     /* When we are targeting ndphdfs, but we do not have a pushdown,
@@ -179,6 +160,8 @@ class HdfsStore(schema: StructType,
      */
     if (isPushdownNeeded &&
         fileSystemType == "ndphdfs") {
+        logger.info(s"SQL Query partition: ${partition.toString}")
+        logger.info(s"SQL Query: ${query}")
         val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
         val inStrm = fs.open(filePath, 4096, readParam).asInstanceOf[FSDataInputStream]
         inStrm.seek(partition.offset)
@@ -248,7 +231,7 @@ class HdfsStore(schema: StructType,
       // When Processor is disabled, we need to deal with partial lines for ourselves.
       return (partition.offset, partition.length)
     }
-    val currentPath = new Path(filePath)
+    val currentPath = new Path(partition.name)
     var startOffset = partition.offset
     var nextChar: Integer = 0
     if (partition.offset != 0) {
@@ -282,6 +265,38 @@ class HdfsStore(schema: StructType,
     // println(s"partition: ${partition.index} offset: ${startOffset} length: ${partitionLength}")
     (startOffset, partitionLength)
   }
+  /** The kind of header we should use.
+   *  In our case we only ever use None or Ignore, since
+   *  we use casts and column numbers, so the header is not needed.
+   * @return NONE or IGNORE
+   */
+  def headerType(): String = {
+    /* If we do not push down, then we will read from hdfs directly,
+     * and therefor need to skip the header ourselves.
+     * When we use ndp, it skips the header for us since we tell it about the header.
+     */
+    if (options.containsKey("header") && (options.get("header") == "true")) {
+      "IGNORE"
+    } else {
+      "NONE"
+    }
+  }
+  /** Returns true if we should skip the header.
+   *
+   * @param partition the partition to read
+   * @return true to skip the header and false otherwise.
+   */
+  def skipHeader(partition: HdfsPartition): Boolean = {
+    /* If we do not push down, then we will read from hdfs directly,
+     * and therefor need to skip the header ourselves.
+     * When we use ndp, it skips the header for us since we tell it about the header.
+     */
+    if (options.containsKey("header") && (options.get("header") == "true")) {
+      (partition.index == 0 && !isPushdownNeeded)
+    } else {
+      false
+    }
+  }
   /** Returns an Iterator over InternalRow for a given Hdfs partition.
    *
    * @param partition the partition to read
@@ -290,8 +305,9 @@ class HdfsStore(schema: StructType,
   def getRowIter(partition: HdfsPartition): Iterator[InternalRow] = {
     val (offset, length) = getPartitionInfo(partition)
     RowIteratorFactory.getIterator(getReader(partition, offset, length),
-                                   readSchema,
-                                   params.get("format"))
+                                   pushdown.readSchema,
+                                   options.get("format"),
+                                   skipHeader(partition))
   }
 }
 

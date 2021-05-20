@@ -21,9 +21,13 @@ import java.util
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{ArrayBuffer}
 
+import com.github.datasource.common.Pushdown
 import org.apache.hadoop.fs.BlockLocation
 import org.slf4j.LoggerFactory
 
+import org.apache.spark.TaskContext
+import org.apache.spark.scheduler._
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.sources._
@@ -49,6 +53,9 @@ class HdfsScan(schema: StructType,
   override def readSchema(): StructType = prunedSchema
 
   override def toBatch: Batch = this
+
+  protected val pushdown = new Pushdown(schema, prunedSchema, filters,
+                                        pushedAggregation, options)
 
   private val maxPartSize: Long = (1024 * 1024 * 128)
   private var partitions: Array[InputPartition] = getPartitions()
@@ -86,9 +93,7 @@ class HdfsScan(schema: StructType,
    * @return array of S3Partitions
    */
   private def getPartitions(): Array[InputPartition] = {
-    var store: HdfsStore = HdfsStoreFactory.getStore(schema, options,
-                                                     filters, prunedSchema,
-                                                     pushedAggregation)
+    var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options)
     val fileName = store.filePath
     val blocks : Map[String, Array[BlockLocation]] = store.getBlockList(fileName)
     createPartitions(blocks, store)
@@ -98,9 +103,7 @@ class HdfsScan(schema: StructType,
     partitions
   }
   override def createReaderFactory(): PartitionReaderFactory =
-          new HdfsPartitionReaderFactory(schema, options, filters,
-                                       prunedSchema,
-                                       pushedAggregation)
+          new HdfsPartitionReaderFactory(pushdown, options)
 }
 
 /** Creates a factory for creating HdfsPartitionReader objects
@@ -111,46 +114,35 @@ class HdfsScan(schema: StructType,
  * @param prunedSchema the new array of columns after pruning
  * @param pushedAggregation the array of aggregations to push down
  */
-class HdfsPartitionReaderFactory(schema: StructType,
-                                 options: util.Map[String, String],
-                                 filters: Array[Filter],
-                                 prunedSchema: StructType,
-                                 pushedAggregation: Aggregation)
+class HdfsPartitionReaderFactory(pushdown: Pushdown,
+                                 options: util.Map[String, String])
   extends PartitionReaderFactory {
   private val logger = LoggerFactory.getLogger(getClass)
   logger.trace("Created")
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
-    new HdfsPartitionReader(schema, options, filters,
-                          prunedSchema, partition.asInstanceOf[HdfsPartition],
-                          pushedAggregation)
+    new HdfsPartitionReader(pushdown, options, partition.asInstanceOf[HdfsPartition])
   }
 }
 
 /** PartitionReader of HdfsPartitions
  *
- * @param schema the column format
+ * @param pushdown object handling filter, project and aggregate pushdown
  * @param options the options including "path"
- * @param filters the array of filters to push down
- * @param prunedSchema the new array of columns after pruning
  * @param partition the HdfsPartition to read from
- * @param pushedAggregation the array of aggregations to push down
  */
-class HdfsPartitionReader(schema: StructType,
+class HdfsPartitionReader(pushdown: Pushdown,
                           options: util.Map[String, String],
-                          filters: Array[Filter],
-                          prunedSchema: StructType,
-                          partition: HdfsPartition,
-                          pushedAggregation: Aggregation)
+                          partition: HdfsPartition)
   extends PartitionReader[InternalRow] {
 
   private val logger = LoggerFactory.getLogger(getClass)
-
+  val tc = TaskContext.get()
+  logger.info(s"Task id: ${tc.taskAttemptId()} Stage id: ${tc.stageId} " +
+              s"Partition: ${partition.index}:${partition.name}")
   /* We setup a rowIterator and then read/parse
    * each row as it is asked for.
    */
-  private var store: HdfsStore = HdfsStoreFactory.getStore(schema, options,
-                                                           filters, prunedSchema,
-                                                           pushedAggregation)
+  private var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options)
   private var rowIterator: Iterator[InternalRow] = store.getRowIter(partition)
 
   var index = 0
