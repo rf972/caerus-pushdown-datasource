@@ -116,7 +116,9 @@ abstract class S3Store(pushdown: Pushdown,
     .withPathStyleAccessEnabled(true)
     .withCredentials(staticCredentialsProvider(s3Credential))
     .withClientConfiguration(new ClientConfiguration().withRequestTimeout(24 * 3600 * 1000)
-                                                      .withSocketTimeout(24 * 3600* 1000))
+                                                      .withSocketTimeout(24 * 3600* 1000)
+                                                      .withTcpKeepAlive(true)
+                                                      .withClientExecutionTimeout(24 * 3600 * 1000))
     .build()
 
   def getReader(partition: S3Partition): BufferedReader;
