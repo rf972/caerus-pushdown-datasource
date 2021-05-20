@@ -17,6 +17,10 @@
 // scalastyle:on
 package com.github.datasource.common
 
+import java.util
+
+import scala.collection.JavaConverters._
+
 import com.amazonaws.services.s3.model.CompressionType
 import com.amazonaws.services.s3.model.CSVInput
 import com.amazonaws.services.s3.model.CSVOutput
@@ -27,12 +31,14 @@ import com.amazonaws.services.s3.model.JSONInput
 import com.amazonaws.services.s3.model.JSONType
 import com.amazonaws.services.s3.model.OutputSerialization
 import com.amazonaws.services.s3.model.ParquetInput
+import com.amazonaws.services.s3.model.ScanRange
 import com.amazonaws.services.s3.model.SelectObjectContentEvent
 import com.amazonaws.services.s3.model.SelectObjectContentEvent.RecordsEvent
 import com.amazonaws.services.s3.model.SelectObjectContentRequest
 import com.amazonaws.services.s3.model.SelectObjectContentResult
 import com.amazonaws.services.s3.model.SSECustomerKey
 import com.github.datasource.s3.S3Partition
+import org.slf4j.LoggerFactory
 
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types._
@@ -41,6 +47,7 @@ import org.apache.spark.sql.types._
  *
  */
 object Select {
+  protected val logger = LoggerFactory.getLogger(getClass)
   private val SERVER_ENCRYPTION_ALGORITHM = s"fs.s3a.server-side-encryption-algorithm"
   private val SERVER_ENCRYPTION_KEY = s"fs.s3a.server-side-encryption.key"
 
@@ -62,7 +69,9 @@ object Select {
   private def headerInfo(params: Map[String, String]): FileHeaderInfo = {
     params.getOrElse("header", "true") match {
       case "false" => FileHeaderInfo.NONE
-      case "true" => FileHeaderInfo.USE
+      // We are always using the column numbers, and will
+      // always skip/ignore the header.
+      case "true" => FileHeaderInfo.IGNORE
     }
   }
 
@@ -82,28 +91,22 @@ object Select {
   /** Returns a SelectObjectContentRequest for S3 and returning Parquet format,
    *  including all the various pushdown queries that are passed in.
    *
-   * @param bucket the bucket/path in the current s3 filesystem
-   * @param key the key/filename in the current s3 filesystem
-   * @param params the set of parameters for generating this request
-   * @param schema the definition of all column formats
-   * @param prunedSchema the set of columns after pruning
-   * @param columns the list of column names.
-   * @param filters the list of filters to push
-   * @param aggregation the list of aggregates to push
+   * @param pushdown object handling all aspects of pushdown
    * @param partition the partition we are operating on.
    * @return a SelectObjectContentRequest for the current query.
    */
-  def requestParquet(bucket: String, key: String, params: Map[String, String],
-                     schema: StructType, prunedSchema: StructType, columns: String,
-                     filters: Array[Filter],
-                     aggregation: Aggregation, partition: S3Partition):
+  def requestParquet(pushdown: Pushdown,
+                     partition: S3Partition):
     SelectObjectContentRequest = {
 
     new SelectObjectContentRequest() { request =>
-      request.setBucketName(bucket)
-      request.setKey(key)
-      request.setExpression(Pushdown.queryFromSchema(
-        schema, prunedSchema, columns, filters, aggregation, partition))
+      val query = pushdown.queryFromSchema(partition)
+      logger.info(s"SQL Query partition: ${partition.toString}")
+      logger.info("Query: " + pushdown.getReadableQuery(partition))
+      logger.info(s"SQL Query: ${query}")
+      request.setBucketName(partition.bucket)
+      request.setKey(partition.key)
+      request.setExpression(query)
       request.setExpressionType(ExpressionType.SQL)
 
       /* Temporarily removed hadoopConfiguration: Configuration as a parameter.
@@ -129,29 +132,21 @@ object Select {
   /** Returns a SelectObjectContentRequest for S3 and returning JSON format
    *  including all the various pushdown queries that are passed in.
    *
-   * @param bucket the bucket/path in the current s3 filesystem
-   * @param key the key/filename in the current s3 filesystem
-   * @param params the set of parameters for generating this request
-   * @param schema the definition of all column formats
-   * @param prunedSchema the set of columns after pruning
-   * @param columns the list of column names.
-   * @param filters the list of filters to push
-   * @param aggregation the list of aggregates to push
+   * @param pushdown object handling all aspects of pushdown
    * @param partition the partition we are operating on.
    * @return a SelectObjectContentRequest for the current query.
    */
-  def requestJSON(bucket: String, key: String, params: Map[String, String],
-                  schema: StructType, prunedSchema: StructType,
-                  columns: String,
-                  filters: Array[Filter],
-                  aggregation: Aggregation, partition: S3Partition):
+  def requestJSON(pushdown: Pushdown, partition: S3Partition):
     SelectObjectContentRequest = {
 
     new SelectObjectContentRequest() { request =>
-      request.setBucketName(bucket)
-      request.setKey(key)
-      request.setExpression(Pushdown.queryFromSchema(
-        schema, prunedSchema, columns, filters, aggregation, partition))
+      val query = pushdown.queryFromSchema(partition)
+      logger.info(s"SQL Query partition: ${partition.toString}")
+      logger.info("Query: " + pushdown.getReadableQuery(partition))
+      logger.info(s"SQL Query: ${query}")
+      request.setBucketName(partition.bucket)
+      request.setKey(partition.key)
+      request.setExpression(query)
       request.setExpressionType(ExpressionType.SQL)
 
       /* Temporarily removed hadoopConfiguration: Configuration as a parameter.
@@ -164,6 +159,7 @@ object Select {
       val algo = null
       val inputSerialization = new InputSerialization()
       val jsonInput = new JSONInput()
+      val params: scala.collection.immutable.Map[String, String] = pushdown.options.asScala.toMap
       jsonInput.withType(jsonType(params))
       inputSerialization.setJson(jsonInput)
       inputSerialization.setCompressionType(compressionType(params))
@@ -179,28 +175,25 @@ object Select {
   /** Returns a SelectObjectContentRequest for S3 returning CSV format
    *  including all the various pushdown queries that are passed in.
    *
-   * @param bucket the bucket/path in the current s3 filesystem
-   * @param key the key/filename in the current s3 filesystem
-   * @param params the set of parameters for generating this request
-   * @param schema the definition of all column formats
-   * @param prunedSchema the set of columns after pruning
-   * @param columns the list of column names.
-   * @param filters the list of filters to push
-   * @param aggregation the list of aggregates to push
+   * @param pushdown object handling all aspects of pushdown
    * @param partition the partition we are operating on.
    * @return a SelectObjectContentRequest for the current query.
    */
-  def requestCSV(bucket: String, key: String, params: Map[String, String],
-                 schema: StructType, prunedSchema: StructType, columns: String,
-                 filters: Array[Filter],
-                 aggregation: Aggregation, partition: S3Partition):
+  def requestCSV(pushdown: Pushdown, partition: S3Partition):
                  SelectObjectContentRequest = {
     new SelectObjectContentRequest() { request =>
-      request.setBucketName(bucket)
-      request.setKey(key)
-      request.setExpression(Pushdown.queryFromSchema(
-        schema, prunedSchema, columns, filters, aggregation, partition))
+      val query = pushdown.queryFromSchema(partition)
+      logger.info(s"SQL Query partition: ${partition.toString}")
+      logger.info("Query: " + pushdown.getReadableQuery(partition))
+      logger.info(s"SQL Query: ${query}")
+      request.setBucketName(partition.bucket)
+      request.setKey(partition.key)
+      request.setExpression(query)
       request.setExpressionType(ExpressionType.SQL)
+
+      var scanRange = new ScanRange().withStart(partition.offsetBytes)
+                                     .withEnd(partition.getEnd)
+      request.setScanRange(scanRange)
 
       /* Disable for now until we get a hadoopConfig
       val algo = hadoopConfiguration.get(SERVER_ENCRYPTION_ALGORITHM, null)
@@ -211,6 +204,7 @@ object Select {
       val algo = null
       val inputSerialization = new InputSerialization()
       val csvInput = new CSVInput()
+      val params: scala.collection.immutable.Map[String, String] = pushdown.options.asScala.toMap
       csvInput.withFileHeaderInfo(headerInfo(params))
       csvInput.withRecordDelimiter('\n')
       csvInput.withQuoteCharacter(params.getOrElse(s"quote", "\""))

@@ -25,7 +25,8 @@
 package com.github.datasource.common
 
 import java.sql.{Date, Timestamp}
-import java.util.{Locale, StringTokenizer}
+import java.util
+import java.util.{HashMap, Locale, StringTokenizer}
 
 import scala.collection.mutable.ArrayBuilder
 
@@ -34,12 +35,19 @@ import org.slf4j.LoggerFactory
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types._
 
-/**
- * Helper methods for pushing filters into Select queries.
+
+/** Provides pushdown capabilities aimed at
+ *  generating information needed for pushdown
+ *  from the inputs that Spark provides.
  */
-object Pushdown {
+class Pushdown(val schema: StructType, val prunedSchema: StructType,
+               val filters: Seq[Filter],
+               val aggregation: Aggregation,
+               val options: util.Map[String, String]) extends Serializable {
 
   protected val logger = LoggerFactory.getLogger(getClass)
+
+  protected var supportsIsNull = !options.containsKey("DisableSupportsIsNull")
   /**
    * Build a SQL WHERE clause for the given filters. If a filter cannot be pushed down then no
    * condition will be added to the WHERE clause. If none of the filters can be pushed down then
@@ -49,25 +57,24 @@ object Pushdown {
    * @param filters an array of filters, the conjunction of which is the filter condition for the
    *                scan.
    */
-  def buildWhereClause(schema: StructType, filters: Seq[Filter]): String = {
-    val filterExpressions = filters.flatMap(f => buildFilterExpression(schema, f)).mkString(" AND ")
+  def buildWhereClause(): String = {
+    val filterExpressions = filters.flatMap(f => buildFilterExpression(f)).mkString(" AND ")
     if (filterExpressions.isEmpty) "" else "WHERE " + filterExpressions
   }
-
   /**
    * Attempt to convert the given filter into a Select expression. Returns None if the expression
    * could not be converted.
    */
-  def buildFilterExpression(schema: StructType, filter: Filter): Option[String] = {
+  def buildFilterExpression(filter: Filter): Option[String] = {
     def buildComparison(attr: String, value: Any, comparisonOp: String): Option[String] = {
-      getTypeForAttribute(schema, attr).map { dataType =>
+      getTypeForAttribute(attr).map { dataType =>
         val sqlEscapedValue: String = dataType match {
           case StringType => s"""'${value.toString.replace("'", "\\'\\'")}'"""
           case DateType => s""""${value.asInstanceOf[Date]}""""
           case TimestampType => s""""${value.asInstanceOf[Timestamp]}""""
           case _ => value.toString
         }
-        s"s." + s""""$attr"""" + s" $comparisonOp $sqlEscapedValue"
+        s"${getColString(attr)}" + s" $comparisonOp $sqlEscapedValue"
       }
     }
     def buildOr(leftFilter: Option[String], rightFilter: Option[String]): Option[String] = {
@@ -85,21 +92,40 @@ object Pushdown {
       Option(s"""NOT ( $f )""")
     }
     filter match {
-      case Or(left, right) => buildOr(buildFilterExpression(schema, left),
-                                      buildFilterExpression(schema, right))
-      case And(left, right) => buildAnd(buildFilterExpression(schema, left),
-                                        buildFilterExpression(schema, right))
-      case Not(filter) => buildNot(buildFilterExpression(schema, filter))
+      case Or(left, right) => buildOr(buildFilterExpression(left),
+                                      buildFilterExpression(right))
+      case And(left, right) => buildAnd(buildFilterExpression(left),
+                                        buildFilterExpression(right))
+      case Not(filter) => buildNot(buildFilterExpression(filter))
       case EqualTo(attr, value) => buildComparison(attr, value, "=")
       case LessThan(attr, value) => buildComparison(attr, value, "<")
       case GreaterThan(attr, value) => buildComparison(attr, value, ">")
       case LessThanOrEqual(attr, value) => buildComparison(attr, value, "<=")
       case GreaterThanOrEqual(attr, value) => buildComparison(attr, value, ">=")
-      case IsNull(attr) => Option(s"${attr} IS NULL")
-      case IsNotNull(attr) => Option(s"${attr} IS NOT NULL")
-      case StringStartsWith(attr, value) => Option(s"${attr} LIKE '${value}%'")
-      case StringEndsWith(attr, value) => Option(s"${attr} LIKE '%${value}'")
-      case StringContains(attr, value) => Option(s"${attr} LIKE '%${value}%'")
+      // When support is not there, do not push down IS NULL.
+      // Allow the pushdown to continue without IS NULL,
+      // to help evaluate pushdown.  For production consider to reject
+      // the pushdown completely.
+      case IsNull(attr) => if (supportsIsNull) {
+          Option(s"${getColString(attr)} IS NULL")
+        } else {
+          Option("TRUE")
+        }
+      // When support is not there, do not push down IS NULL.
+      // Allow the pushdown to continue without IS NULL,
+      // to help evaluate pushdown.  For production consider to reject
+      // the pushdown completely.
+      case IsNotNull(attr) => if (supportsIsNull) {
+          Option(s"${getColString(attr)} IS NOT NULL")
+        } else {
+          Option("TRUE")
+        }
+      case StringStartsWith(attr, value) =>
+        Option(s"${getColString(attr)} LIKE '${value}%'")
+      case StringEndsWith(attr, value) =>
+        Option(s"${getColString(attr)} LIKE '%${value}'")
+      case StringContains(attr, value) =>
+        Option(s"${getColString(attr)} LIKE '%${value}%'")
       case other@_ => logger.info("unknown filter:" + other) ; None
     }
   }
@@ -108,7 +134,7 @@ object Pushdown {
    * Use the given schema to look up the attribute's data type. Returns None if the attribute could
    * not be resolved.
    */
-  private def getTypeForAttribute(schema: StructType, attribute: String): Option[DataType] = {
+  private def getTypeForAttribute(attribute: String): Option[DataType] = {
     if (schema.fieldNames.contains(attribute)) {
       Some(schema(attribute).dataType)
     } else {
@@ -116,37 +142,40 @@ object Pushdown {
     }
   }
   def quoteIdentifier(colName: String): String = {
-    s""""$colName""""
+    s"${getColString(colName)}"
   }
   /**
    * `columns`, but as a String suitable for injection into a SQL query.
    */
-  def getColumnSchema(aggregation: Aggregation,
-                      schema: StructType):
-                     (String, StructType) = {
+  def getColumnSchema(): (String, StructType) = {
 
     val (compiledAgg, aggDataType) = compileAggregates(aggregation.aggregateExpressions)
     val sb = new StringBuilder()
-    val columnNames = schema.map(_.name).toArray
+    val columnNames = prunedSchema.map(_.name).toArray
     var updatedSchema: StructType = new StructType()
     if (compiledAgg.length == 0) {
-      updatedSchema = schema
-      columnNames.foreach(x => sb.append(",").append(x))
+      val cols = prunedSchema.fields.map(x => {
+            getColString(x.name)
+        }).toArray
+      updatedSchema = prunedSchema
+      cols.foreach(x => sb.append(",").append(x))
     } else {
-      updatedSchema = getAggregateColumnsList(sb, aggregation, schema, compiledAgg, aggDataType)
+      updatedSchema = getAggregateColumnsList(sb, compiledAgg, aggDataType)
     }
     (if (sb.length == 0) "" else sb.substring(1),
-     if (sb.length == 0) schema else updatedSchema)
+     if (sb.length == 0) prunedSchema else updatedSchema)
   }
   private def containsArithmeticOp(col: String): Boolean =
-    col.contains("+") || col.contains("-") || col.contains("*") || col.contains("/")
+    col.contains("+") || col.contains("-") ||
+    col.contains("*") || col.contains("/") ||
+    col.contains("(") || col.contains(")")
 
   /** Returns an array of aggregates translated to strings.
    *
    * @param aggregates the array of aggregates to translate
    * @return array of strings
    */
-  def compileAggregates(aggregates: Seq[AggregateFunc]): (Array[String], Array[DataType]) = {
+  def compileAggregates(aggregates: Seq[AggregateFunc]) : (Array[String], Array[DataType]) = {
     def quote(colName: String): String = quoteIdentifier(colName)
     val aggBuilder = ArrayBuilder.make[String]
     val dataTypeBuilder = ArrayBuilder.make[DataType]
@@ -197,22 +226,20 @@ object Pushdown {
   private def quoteEachCols (column: String): String = {
     def quote(colName: String): String = quoteIdentifier(colName)
     val colsBuilder = ArrayBuilder.make[String]
-    val st = new StringTokenizer(column, "+-*/", true)
+    val st = new StringTokenizer(column, "+-*/()", true)
     colsBuilder += quote(st.nextToken().trim)
     while (st.hasMoreTokens) {
-      colsBuilder += st.nextToken
-      colsBuilder +=  quote(st.nextToken().trim)
+      colsBuilder += quote(st.nextToken().trim)
     }
     colsBuilder.result.mkString(" ")
   }
   private def getAggregateColumnsList(sb: StringBuilder,
-                                      aggregation: Aggregation, schema: StructType,
                                       compiledAgg: Array[String],
                                       aggDataType: Array[DataType]) = {
-    val columnNames = schema.map(_.name).toArray
+    val columnNames = prunedSchema.map(_.name).toArray
     val quotedColumns: Array[String] =
       columnNames.map(colName => quoteIdentifier(colName.toLowerCase(Locale.ROOT)))
-    val colDataTypeMap: Map[String, StructField] = quotedColumns.zip(schema.fields).toMap
+    val colDataTypeMap: Map[String, StructField] = quotedColumns.zip(prunedSchema.fields).toMap
     val newColsBuilder = ArrayBuilder.make[String]
     var updatedSchema: StructType = new StructType()
 
@@ -242,7 +269,7 @@ object Pushdown {
   }
 
   def quoteIdentifierGroupBy(colName: String): String = {
-    s""""$colName""""
+    s"${getColString(colName)}"
   }
   private def getGroupByClause(aggregation: Aggregation): String = {
     if (aggregation.groupByExpressions.length > 0) {
@@ -253,24 +280,105 @@ object Pushdown {
     }
   }
 
+  /** returns the representation of the column name according to the
+   *  current option set.
+   *  @param attr - Attribute name
+   *  @param disableCast - true to disable any casting.
+   *  @return String - representation of the column name.
+   */
+  def getColString(attr: String, disableCast: Boolean = false): String = {
+    var allowCast = !disableCast
+    val colString =
+      if (options.containsKey("useColumnNames")) {
+        s"${attr}"
+      } else {
+        val index = getSchemaIndex(attr)
+        // If the attribute is not recognized, it might
+        // be an operator.  Just allow it to be inserted
+        // as is without any cast.
+        if (index == -1) {
+          allowCast = false
+          attr
+        } else {
+          s"_${index}"
+        }
+      }
+    if (options.containsKey("DisableCasts") || !allowCast) {
+      colString
+    } else {
+      getColCastString(colString, attr)
+    }
+  }
+
+  /** returns the index of a field matching an input name in a schema.
+   *
+   * @param name the name of the field to search for in schema
+   *
+   * @return Integer - The index of this field in the input schema.
+   */
+  def getSchemaIndex(name: String): Integer = {
+    for (i <- 0 to schema.fields.size - 1) {
+      if (schema.fields(i).name == name) {
+        return i + 1
+      }
+    }
+    -1
+  }
+  private val disabledCasts = {
+    val userDisabledCasts: String = {
+      if (options.containsKey("DisabledCasts")) {
+        options.get("DisabledCasts")
+      } else {
+        ""
+      }}
+    s"TIMESTAMP,STRING,${userDisabledCasts}".split(",")
+  }
+  logger.trace(s"disabledCasts ${disabledCasts.mkString(",")}")
+
+  /** returns the representation of the column, cast to a
+   *  specific value.
+   *  @param colString - Representation of column chosen by caller
+   *  @param colName - Name of column in schema
+   *  @return String - representation of the column name.
+   */
+  def getColCastString(colString: String, colName: String): String = {
+    val attrType = getTypeForAttribute(colName).getOrElse(StringType)
+    /* We match the type to the types specified by AWS S3 Select.
+     */
+    val mappedType = attrType match {
+      case _: BooleanType => "BOOL"
+      case _: IntegerType => "INTEGER"
+      case _: LongType => "INTEGER"
+      case _: FloatType => "FLOAT"
+      case _: DecimalType => "NUMERIC"
+      case _: DoubleType => "NUMERIC"
+      case _: StringType => "STRING"
+      case _: DateType => "TIMESTAMP"
+      case _ => s"UNKNOWN_${attrType}"
+    }
+    if (disabledCasts.contains(mappedType)) {
+      s"${colString}"
+    } else {
+      s"CAST(${colString} as ${mappedType})"
+    }
+  }
+
   /** Returns a string to represent the input query.
    *
    * @return String representing the query to send to the endpoint.
    */
-  def queryFromSchema(schema: StructType,
-                      prunedSchema: StructType,
-                      columns: String,
-                      filters: Array[Filter],
-                      aggregation: Aggregation,
-                      partition: PushdownPartition): String = {
-    var columnList = prunedSchema.fields.map(x => s"s." + s""""${x.name}"""").mkString(",")
-
-    if (columns.length > 0) {
-      columnList = columns
-    } else if (columnList.length == 0) {
-      columnList = "*"
+  def queryFromSchema(partition: PushdownPartition): String = {
+    var columnList = ""
+    if (readColumns.length > 0) {
+      columnList = readColumns
+    } else {
+      columnList = readSchema.fields.map(x => s"" +
+                                         s"${getColString(x.name)}").mkString(",")
+      if (columnList.length == 0) {
+        columnList = "*"
+      }
     }
-    val whereClause = buildWhereClause(schema, filters)
+    val whereClause = buildWhereClause()
     val objectClause = partition.getObjectClause(partition)
     var retVal = ""
     val groupByClause = getGroupByClause(aggregation)
@@ -279,10 +387,52 @@ object Pushdown {
     } else {
       retVal = s"SELECT $columnList FROM $objectClause s $whereClause $groupByClause"
     }
-    logger.info(s"SQL Query partition: ${partition.toString}")
-    logger.info(s"SQL Query: ${retVal}")
     retVal
   }
+  /** Determines if we can push down this aggregate operation.
+   *  @return Boolean true if valid, false otherwise
+   */
+  def aggregatePushdownValid(): Boolean = {
+    val (compiledAgg, aggDataType) =
+      compileAggregates(aggregation.aggregateExpressions)
+    (compiledAgg.isEmpty == false &&
+    (!options.containsKey("DisableGroupbyPush") ||
+      aggregation.groupByExpressions.length == 0))
+  }
+  val (readColumns: String,
+       readSchema: StructType) = {
+    var (columns, updatedSchema) =
+      getColumnSchema()
+    (columns,
+     if (updatedSchema.names.isEmpty) schema else updatedSchema)
+  }
+  /** Returns a Query that is fully readable and does
+   *  not contain any casts or column numbers..
+   *
+   *  @param partition the partition to render this query.
+   *  @return String a string of the query.
+   */
+  def getReadableQuery(partition: PushdownPartition): String = {
+    val optionsCopy = new HashMap[String, String](options)
+    // Set options to render query readable.
+    // Set option to represent columns with names instead of numbers.
+    // Set option to not use casts
+    optionsCopy.put("useColumnNames", "")
+    optionsCopy.put("DisableCasts", "")
+    val pd = new Pushdown(schema, prunedSchema,
+                          filters, aggregation,
+                          optionsCopy)
+    pd.queryFromSchema(partition)
+  }
+}
+
+/**
+ * Helper methods for pushing filters into Select queries.
+ */
+object Pushdown {
+
+  protected val logger = LoggerFactory.getLogger(getClass)
+
   /** Returns a string to represent the schema of the table.
    *
    * @param schema the StructType representing the definition of columns.

@@ -30,9 +30,9 @@ import org.apache.spark.sql.types._
  */
 abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   import testImplicits._
-  private val s3IpAddr = "minioserver"
+  private val s3IpAddr = "dikehdfs"
   override def sparkConf: SparkConf = super.sparkConf
-      .set("spark.datasource.pushdown.endpoint", s"""http://$s3IpAddr:9000""")
+      .set("spark.datasource.pushdown.endpoint", s"http://$s3IpAddr:9858")
       .set("spark.datasource.pushdown.accessKey", "admin")
       .set("spark.datasource.pushdown.secretKey", "admin123")
 
@@ -50,11 +50,46 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
    */
   protected def df() : DataFrame
 
+  /** Initializes a data frame with the sample data and
+   *  then writes this dataframe out to hdfs.
+   */
+  protected def initData(): Unit = {
+    val s = spark
+    import s.implicits._
+    val testDF = dataValues.toSeq.toDF("i", "j", "k")
+    testDF.select("*").repartition(1)
+      .write.mode("overwrite")
+      .option("delimiter", ",")
+      .format("csv")
+      .option("header", "true")
+      .option("partitions", "1")
+      .save("hdfs://dikehdfs:9000/integer-test")
+    testDF.select("*").repartition(1)
+      .write.mode("overwrite")
+      .option("delimiter", ",")
+      .format("csv")
+      .option("header", "false")
+      .option("partitions", "1")
+      .save("hdfs://dikehdfs:9000/integer-test-noheader")
+  }
+  private val dataValues = Seq((0, 5, 1), (1, 10, 2), (2, 5, 1),
+                               (3, 10, 2), (4, 5, 1), (5, 10, 2), (6, 5, 1))
+  /** returns a dataframe object, which is to be used for testing of
+   *  each test case in this suite.
+   *  In this case, the data for the DataFrame does not contain a header.
+   *  This can be overloaded in a new suite, which defines
+   *  its own data frame.
+   *
+   * @return DataFrame - The new dataframe object to be used in testing.
+   */
+  protected def dfNoHeader() : DataFrame
+
   override def beforeAll(): Unit = {
     super.beforeAll()
     spark.sparkContext.setLogLevel("WARN")
-
+    initData()
     df.createOrReplaceTempView("integers")
+    dfNoHeader.createOrReplaceTempView("integersNoHeader")
   }
 
   override def afterAll(): Unit = {
@@ -63,7 +98,10 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   test("simple scan") {
     checkAnswer(df, Seq(Row(0, 5, 1), Row(1, 10, 2), Row(2, 5, 1),
                         Row(3, 10, 2), Row(4, 5, 1), Row(5, 10, 2), Row(6, 5, 1)))
+    checkAnswer(dfNoHeader, Seq(Row(0, 5, 1), Row(1, 10, 2), Row(2, 5, 1),
+                            Row(3, 10, 2), Row(4, 5, 1), Row(5, 10, 2), Row(6, 5, 1)))
     df.show()
+    dfNoHeader.show()
   }
   test("simple project") {
     checkAnswer(df.select("i", "j", "k"),
@@ -74,6 +112,28 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
                        Row(3, 10), Row(4, 5), Row(5, 10), Row(6, 5)))
     checkAnswer(df.filter("i >= 5"),
                 Seq(Row(5, 10, 2), Row(6, 5, 1)))
+  }
+  test("no header") {
+    checkAnswer(dfNoHeader.select("i", "j", "k"),
+                Seq(Row(0, 5, 1), Row(1, 10, 2), Row(2, 5, 1),
+                       Row(3, 10, 2), Row(4, 5, 1), Row(5, 10, 2), Row(6, 5, 1)))
+    checkAnswer(dfNoHeader.select("i", "j"),
+                Seq(Row(0, 5), Row(1, 10), Row(2, 5),
+                       Row(3, 10), Row(4, 5), Row(5, 10), Row(6, 5)))
+    checkAnswer(dfNoHeader.filter("i >= 5"),
+                Seq(Row(5, 10, 2), Row(6, 5, 1)))
+    checkAnswer(dfNoHeader.filter("i > 4")
+                  .agg(sum("i") * sum("j")),
+                Seq(Row(165)))
+    checkAnswer(dfNoHeader.agg(sum("j")),
+                Seq(Row(50)))
+    checkAnswer(dfNoHeader.agg(min("k"), max("k")),
+                Seq(Row(1, 2)))
+    checkAnswer(sql("SELECT count(*) FROM integersNoHeader"),
+                Seq(Row(7)))
+    checkAnswer(sql("SELECT sum(k + j) FROM integersNoHeader WHERE i > 1" +
+                    " GROUP BY j"),
+                Seq(Row(18), Row(24)))
   }
   test("basic aggregate") {
     checkAnswer(df.filter("i > 4")
@@ -125,7 +185,7 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   }
   test ("aggregate with expressions") {
 
-    checkAnswer(sql("SELECT sum(k * j) FROM integers WHERE i > 1" +
+    checkAnswer(sql("SELECT sum(k * j) AS prod_kj FROM integers WHERE i > 1" +
                     " GROUP BY j"),
                 Seq(Row(15), Row(40)))
     checkAnswer(sql("SELECT j, sum(k * j) FROM integers WHERE i > 1" +
@@ -199,3 +259,6 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
                 Seq(Row(7)))
   }
 }
+// testOnly com.github.datasource.test.DataSourceV2HdfsSuite
+// testOnly com.github.datasource.test.DataSourceV2S3Suite
+// testOnly com.github.datasource.test.DataSourceV2HdfsSuite -- -z "no header"
