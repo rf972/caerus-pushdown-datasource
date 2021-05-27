@@ -29,16 +29,7 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
 import scala.util.control.NonFatal
 
-import com.amazonaws.ClientConfiguration
-import com.amazonaws.auth.{AWSStaticCredentialsProvider, BasicAWSCredentials}
-import com.amazonaws.auth.AWSCredentials
-import com.amazonaws.auth.AWSCredentialsProvider
-import com.amazonaws.client.builder.AwsClientBuilder
-import com.amazonaws.client.builder.AwsClientBuilder.EndpointConfiguration
-import com.amazonaws.regions.Regions
 import com.amazonaws.services.s3.AmazonS3
-import com.amazonaws.services.s3.AmazonS3ClientBuilder
-import com.amazonaws.services.s3.AmazonS3URI
 import com.amazonaws.services.s3.model.ListObjectsV2Request
 import com.amazonaws.services.s3.model.ListObjectsV2Result
 import com.amazonaws.services.s3.model.S3ObjectSummary
@@ -70,7 +61,10 @@ import org.apache.spark.unsafe.types.UTF8String
  *  store object depending on the expected output type
  *  to be sent back from the store.
  */
-object S3StoreFactory{
+object S3StoreFactory {
+
+  protected val logger = LoggerFactory.getLogger(getClass)
+
   /** Returns the store object which can process
    *  the input format from params("format").
    *  Currently only csv, json, parquet are supported.
@@ -87,6 +81,8 @@ object S3StoreFactory{
       case "csv" => new S3StoreCSV(pushdown, params)
       case "json" => new S3StoreJSON(pushdown, params)
       case "parquet" => new S3StoreParquet(pushdown, params)
+      case _ => logger.warn(s"Unexpected format: ${format}")
+      throw new Exception(s"Unexpected format: ${format}")
     }
   }
 }
@@ -102,24 +98,7 @@ abstract class S3Store(pushdown: Pushdown,
 
   protected var path = params.get("path")
   protected val logger = LoggerFactory.getLogger(getClass)
-  def staticCredentialsProvider(credentials: AWSCredentials): AWSCredentialsProvider = {
-    new AWSCredentialsProvider {
-      override def getCredentials: AWSCredentials = credentials
-      override def refresh(): Unit = {}
-    }
-  }
-  protected val s3Credential = new BasicAWSCredentials(params.get("accessKey"),
-                                                       params.get("secretKey"))
-  protected val s3Client = AmazonS3ClientBuilder.standard()
-    .withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration(
-                               params.get("endpoint"), Regions.US_EAST_1.name()))
-    .withPathStyleAccessEnabled(true)
-    .withCredentials(staticCredentialsProvider(s3Credential))
-    .withClientConfiguration(new ClientConfiguration().withRequestTimeout(24 * 3600 * 1000)
-                                                      .withSocketTimeout(24 * 3600* 1000)
-                                                      .withTcpKeepAlive(true)
-                                                      .withClientExecutionTimeout(24 * 3600 * 1000))
-    .build()
+  protected val s3Client: com.amazonaws.services.s3.AmazonS3 = S3Client(params).getClient
 
   def getReader(partition: S3Partition): BufferedReader;
   def getRowIter(partition: S3Partition): Iterator[InternalRow];
