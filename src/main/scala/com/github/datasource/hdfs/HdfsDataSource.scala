@@ -22,17 +22,27 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable.{ArrayBuffer}
 
 import com.github.datasource.common.Pushdown
+import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.BlockLocation
+import org.apache.hadoop.fs.Path
+import org.apache.parquet.HadoopReadOptions
+import org.apache.parquet.hadoop.ParquetFileReader
+import org.apache.parquet.hadoop.util.HadoopInputFile
+import org.json4s._
+import org.json4s.jackson.JsonMethods._
 import org.slf4j.LoggerFactory
 
 import org.apache.spark.TaskContext
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.scheduler._
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read._
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.sources.Aggregation
 import org.apache.spark.sql.types._
+import org.apache.spark.util.SerializableConfiguration
 
 /** A scan object that works on HDFS files.
  *
@@ -52,6 +62,13 @@ class HdfsScan(schema: StructType,
   logger.trace("Created")
   override def readSchema(): StructType = prunedSchema
 
+  private def init(): Unit = {
+    if (options.get("format") == "parquet") {
+      // The default for parquet is to use column names for now.
+      options.put("useColumnNames", "")
+    }
+  }
+  init()
   override def toBatch: Batch = this
 
   protected val pushdown = new Pushdown(schema, prunedSchema, filters,
@@ -84,6 +101,55 @@ class HdfsScan(schema: StructType,
     }
     a.toArray
   }
+  private def createPartitionsParquet(blockMap: Map[String, Array[BlockLocation]],
+                                      store: HdfsStore): Array[InputPartition] = {
+    var a = new ArrayBuffer[InputPartition](0)
+    var i = 0
+    val conf = new Configuration()
+    val readOptions = HadoopReadOptions.builder(conf)
+                                       .build()
+    logger.trace("blockMap: {}", blockMap.mkString(", "))
+    // For now just one partition per file.
+    if ( true || (options.containsKey("partitions") &&
+                  options.get("partitions").toInt == 1)) {
+      // Generate one partition per file
+      for ((fName, blockList) <- blockMap) {
+        val reader = ParquetFileReader.open(HadoopInputFile.fromPath(new Path(fName), conf),
+                                            readOptions)
+        val parquetBlocks = reader.getFooter.getBlocks
+        val parquetBlock = parquetBlocks.get(0)
+        a += new HdfsPartition(index = 0, offset = parquetBlock.getStartingPos,
+                               length = parquetBlock.getTotalByteSize,
+                               name = fName,
+                               store.getModifiedTime(fName))
+      }
+    } else {
+      // Generate one partition per file, per hdfs block
+      for ((fName, blockList) <- blockMap) {
+        val reader = ParquetFileReader.open(HadoopInputFile.fromPath(new Path(fName),
+                                                                     conf), readOptions)
+        val parquetBlocks = reader.getFooter.getBlocks
+        // Generate one partition per row Group.
+        for (i <- 0 to parquetBlocks.size - 1) {
+          val parquetBlock = parquetBlocks.get(i)
+          a += new HdfsPartition(index = i, offset = parquetBlock.getStartingPos,
+                                 length = parquetBlock.getTotalByteSize,
+                                 name = fName,
+                                 store.getModifiedTime(fName))
+        }
+      }
+    }
+    logger.info(a.mkString(", "))
+    a.toArray
+  }
+
+  private val sparkSession: SparkSession = SparkSession
+      .builder()
+      .appName("ndp")
+      .getOrCreate()
+  private val broadcastedHadoopConf =
+      sparkSession.sparkContext.broadcast(new SerializableConfiguration(
+        sparkSession.sessionState.newHadoopConf()))
   /** Returns an Array of S3Partitions for a given input file.
    *  the file is selected by options("path").
    *  If there is one file, then we will generate multiple partitions
@@ -93,10 +159,14 @@ class HdfsScan(schema: StructType,
    * @return array of S3Partitions
    */
   private def getPartitions(): Array[InputPartition] = {
-    var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options)
+    var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options,
+                                                     sparkSession, broadcastedHadoopConf)
     val fileName = store.filePath
     val blocks : Map[String, Array[BlockLocation]] = store.getBlockList(fileName)
-    createPartitions(blocks, store)
+    options.get("format") match {
+      case "parquet" => createPartitionsParquet(blocks, store)
+      case _ => createPartitions(blocks, store)
+    }
   }
 
   override def planInputPartitions(): Array[InputPartition] = {
@@ -118,9 +188,23 @@ class HdfsPartitionReaderFactory(pushdown: Pushdown,
                                  options: util.Map[String, String])
   extends PartitionReaderFactory {
   private val logger = LoggerFactory.getLogger(getClass)
+  private val sparkSession: SparkSession = SparkSession
+      .builder()
+      .appName("ndp")
+      .getOrCreate()
+  private val broadcastedHadoopConf =
+      sparkSession.sparkContext.broadcast(new SerializableConfiguration(
+        sparkSession.sessionState.newHadoopConf()))
   logger.trace("Created")
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
-    new HdfsPartitionReader(pushdown, options, partition.asInstanceOf[HdfsPartition])
+    broadcastedHadoopConf.value.value.setBoolean(
+      SQLConf.PARQUET_BINARY_AS_STRING.key,
+      false)
+    broadcastedHadoopConf.value.value.setBoolean(
+      SQLConf.PARQUET_INT96_AS_TIMESTAMP.key,
+      true)
+    new HdfsPartitionReader(pushdown, options, partition.asInstanceOf[HdfsPartition],
+                            sparkSession, broadcastedHadoopConf)
   }
 }
 
@@ -132,7 +216,9 @@ class HdfsPartitionReaderFactory(pushdown: Pushdown,
  */
 class HdfsPartitionReader(pushdown: Pushdown,
                           options: util.Map[String, String],
-                          partition: HdfsPartition)
+                          partition: HdfsPartition,
+                          sparkSession: SparkSession,
+ sharedConf: Broadcast[org.apache.spark.util.SerializableConfiguration])
   extends PartitionReader[InternalRow] {
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -142,8 +228,16 @@ class HdfsPartitionReader(pushdown: Pushdown,
   /* We setup a rowIterator and then read/parse
    * each row as it is asked for.
    */
-  private var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options)
-  private var rowIterator: Iterator[InternalRow] = store.getRowIter(partition)
+  private var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options,
+                                                           sparkSession, sharedConf)
+  private var rowIterator: Iterator[InternalRow] = {
+    if (options.get("format") == "parquet") {
+      store.getRowIterParquet(partition)
+      // store.getParquetIterator(partition)
+    } else {
+      store.getRowIter(partition)
+    }
+  }
 
   var index = 0
   def next: Boolean = {

@@ -28,7 +28,7 @@ import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
 
 import com.github.datasource.common.Pushdown
-import com.github.datasource.parse.RowIteratorFactory
+import com.github.datasource.parse.{ParquetRowIterator, RowIteratorFactory}
 import org.apache.commons.csv._
 import org.apache.commons.io.IOUtils
 import org.apache.commons.io.input.BoundedInputStream
@@ -37,15 +37,32 @@ import org.apache.hadoop.fs.BlockLocation
 import org.apache.hadoop.fs.FileSystem
 import org.apache.hadoop.fs.FSDataInputStream
 import org.apache.hadoop.fs.Path
+import org.apache.hadoop.mapred.FileSplit
+import org.apache.hadoop.mapreduce._
+import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
+import org.apache.parquet.HadoopReadOptions
+import org.apache.parquet.hadoop.ParquetFileReader
+import org.apache.parquet.hadoop.ParquetRecordReader
+import org.apache.parquet.hadoop.metadata.FileMetaData
+import org.apache.parquet.hadoop.util.HadoopInputFile
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName._
+import org.apache.parquet.schema.Type
 import org.dike.hdfs.NdpHdfsFileSystem
 import org.slf4j.LoggerFactory
 
+import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Row, SQLContext}
 import org.apache.spark.sql.{SaveMode, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, InterpretedOrdering}
+import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjection
 import org.apache.spark.sql.connector.read._
+import org.apache.spark.sql.execution.datasources.RecordReaderIterator
+import org.apache.spark.sql.execution.datasources.parquet._
+import org.apache.spark.sql.internal.SQLConf.LegacyBehaviorPolicy
 import org.apache.spark.sql.sources.{Aggregation, Filter}
 import org.apache.spark.sql.types._
 
@@ -60,8 +77,11 @@ object HdfsStoreFactory {
    * @return a new HdfsStore object constructed with above parameters.
    */
   def getStore(pushdown: Pushdown,
-               options: java.util.Map[String, String]): HdfsStore = {
-    new HdfsStore(pushdown, options)
+               options: java.util.Map[String, String],
+               sparkSession: SparkSession,
+               sharedConf: Broadcast[org.apache.spark.util.SerializableConfiguration]):
+      HdfsStore = {
+    new HdfsStore(pushdown, options, sparkSession, sharedConf)
   }
 }
 /** A hdfs store object which can connect
@@ -72,7 +92,9 @@ object HdfsStoreFactory {
  * @param options the parameters including those to construct the store
  */
 class HdfsStore(pushdown: Pushdown,
-                options: java.util.Map[String, String]) {
+                options: java.util.Map[String, String],
+                sparkSession: SparkSession,
+                sharedConf: Broadcast[org.apache.spark.util.SerializableConfiguration]) {
   override def toString() : String = "HdfsStore" + options + pushdown.filters.mkString(", ")
   protected val path = options.get("path")
   protected val isPushdownNeeded: Boolean = {
@@ -80,7 +102,8 @@ class HdfsStore(pushdown: Pushdown,
      * If any of the pushdowns are in use (project, filter, aggregate),
      * then we will consider that pushdown is needed.
      */
-    ((pushdown.prunedSchema.length != pushdown.schema.length) ||
+    (true || /* FIXME: added for csv/parquet forcing */
+     (pushdown.prunedSchema.length != pushdown.schema.length) ||
      (pushdown.filters.length > 0) ||
      (pushdown.aggregation.aggregateExpressions.length > 0) ||
      (pushdown.aggregation.groupByExpressions.length > 0))
@@ -107,12 +130,15 @@ class HdfsStore(pushdown: Pushdown,
     }
   }
   protected val logger = LoggerFactory.getLogger(getClass)
-  protected val fileSystem = {
+  protected val configure: Configuration = {
     val conf = new Configuration()
     conf.set("dfs.datanode.drop.cache.behind.reads", "true")
     conf.set("dfs.client.cache.readahead", "0")
     conf.set("fs.ndphdfs.impl", classOf[org.dike.hdfs.NdpHdfsFileSystem].getName)
-
+    conf
+  }
+  protected val fileSystem = {
+    val conf = configure
     if (path.contains("ndphdfs")) {
       val fs = FileSystem.get(URI.create(endpoint), conf)
       fs.asInstanceOf[NdpHdfsFileSystem]
@@ -149,11 +175,16 @@ class HdfsStore(pushdown: Pushdown,
             ("", "")
           }
         }
-        (new ProcessorRequest(requestSchema, requestQuery, partition.length,
-                              headerType).toXml,
-         requestQuery)
+        options.get("format") match {
+          case "parquet" => (new ProcessorRequestParquet(partition.modifiedTime, partition.index,
+                                 requestQuery, partition.length,
+                                 headerType).toXml, requestQuery)
+          case _ => (new ProcessorRequest(requestSchema, requestQuery, partition.length,
+                         headerType).toXml, requestQuery)
+        }
       }
     }
+    logger.info(readParam)
     /* When we are targeting ndphdfs, but we do not have a pushdown,
      * we will not pass the processor element.
      * This allows the NDP server to optimize further.
@@ -174,6 +205,77 @@ class HdfsStore(pushdown: Pushdown,
         inStrm.seek(startOffset)
         new BufferedReader(new InputStreamReader(new BoundedInputStream(inStrm, length)))
     }
+  }
+
+  def getDataType(primitiveType: PrimitiveTypeName): DataType = {
+    primitiveType match {
+        case BOOLEAN => BooleanType
+        case INT32 => IntegerType
+        case INT64 => LongType
+        case DOUBLE => DoubleType
+        case FLOAT => FloatType
+        case _ => StringType
+    }
+  }
+  def getDataTypes(parquetMetadata: FileMetaData): Array[DataType] = {
+    val schema = parquetMetadata.getSchema()
+    val types: java.util.List[Type] = schema.asGroupType().getFields()
+    var dataTypes = new Array[DataType](types.size)
+    for (i <- 0 to types.size - 1) {
+      val pType = types.get(i).asPrimitiveType()
+      dataTypes(i) = getDataType(pType.getPrimitiveTypeName())
+    }
+    dataTypes
+  }
+  def getParquetIteratorOld(partition: HdfsPartition): Iterator[InternalRow] = {
+    // sparkSchema = new ParquetToSparkSchemaConverter(config).convert(requestedSchema)
+    // List<ColumnDescriptor> columns = requestedSchema.getColumns();
+    logger.info(s"get reader ${partition.name}")
+    // var hadoopConf: Configuration =
+    //        sparkSession.sessionState.newHadoopConf() // WithOptions(options)
+    val hadoopConf = sharedConf.value.value
+    // hadoopConf.set("io.file.buffer.size", "16777216")
+    val readOptions = HadoopReadOptions.builder(hadoopConf)
+                                       .build()
+    // logger.info(hadoopConf.getPropsWithPrefix("hadoop").toString)
+    // logger.info(hadoopConf.getPropsWithPrefix("io").toString)
+    // Don't forget to pass hadoop Config through
+    // val reader = ParquetFileReader.open(NdpInputFile.fromPath(partition.name), readOptions)
+    val reader = ParquetFileReader.open(
+                   HadoopInputFile.fromPath(new Path(partition.name), hadoopConf), readOptions)
+    val schema = reader.getFileMetaData().getSchema()
+    val types: java.util.List[Type] = schema.asGroupType().getFields()
+    val dataTypes = getDataTypes(reader.getFileMetaData())
+    ParquetRowIterator(reader, dataTypes)
+  }
+  def getParquetIterator(partition: HdfsPartition): Iterator[InternalRow] = {
+
+    val hadoopConf = sharedConf.value.value
+    logger.info(s"get reader ${partition.name}")
+    val readSupport = new ParquetReadSupport(
+      None,
+      false,
+      LegacyBehaviorPolicy.CORRECTED,
+      LegacyBehaviorPolicy.LEGACY)
+      hadoopConf.set(
+      ParquetReadSupport.SPARK_ROW_REQUESTED_SCHEMA,
+      pushdown.schema.json)
+    val reader = new ParquetRecordReader[InternalRow](readSupport)
+    val iter = new RecordReaderIterator[InternalRow](reader)
+    // taskContext.foreach(_.addTaskCompletionListener[Unit](_ => iter.close()))
+    val attemptId = new TaskAttemptID(new TaskID(new JobID(), TaskType.MAP, 0), 0)
+    val hadoopAttemptContext =
+        new TaskAttemptContextImpl(sharedConf.value.value, attemptId)
+    val filePath = new Path(new URI(partition.name))
+    val split = new FileSplit(filePath, 0, partition.length, Array.empty[String])
+    reader.initialize(split, hadoopAttemptContext)
+    /* val attrib = pushdown.schema.map(f => AttributeReference(f.name,
+                                           f.dataType, f.nullable, f.metadata)())
+    val fullSchema = attrib
+    val unsafeProjection = GenerateUnsafeProjection.generate(fullSchema, fullSchema)
+    */
+    iter
+    // iter.map(unsafeProjection)
   }
   /** Returns a list of BlockLocation object representing
    *  all the hdfs blocks in a file.
@@ -196,7 +298,9 @@ class HdfsStore(pushdown: Pushdown,
        */
       val status = fileSystem.listStatus(fileToRead)
       for (item <- status) {
-        if (item.isFile && item.getPath.getName.contains(".csv")) {
+        if (item.isFile && (item.getPath.getName.contains(".csv") ||
+                            item.getPath.getName.contains(".tbl") ||
+                            item.getPath.getName.contains(".parquet"))) {
           val currentFile = item.getPath.toString
           // Use MaxValue to indicate we want info on all blocks.
           blockMap(currentFile) = fileSystem.getFileBlockLocations(item.getPath, 0, Long.MaxValue)
@@ -215,6 +319,18 @@ class HdfsStore(pushdown: Pushdown,
     val fileToRead = new Path(filePath)
     val fileStatus = fileSystem.getFileStatus(fileToRead)
     fileStatus.getLen
+  }
+
+  /** Returns the last modification time of the file.
+   *
+   * @param fileName the full path of the file
+   * @return modified time of the file.
+   */
+  def getModifiedTime(fileName: String) : Long = {
+    val fileToRead = new Path(filePath)
+    val fileStatus = fileSystem.getFileStatus(fileToRead)
+    // logger.info("fileStatus {}", fileStatus.toString)
+    fileStatus.getModificationTime
   }
   /** Returns the offset, length in bytes of an hdfs partition.
    *  This takes into account any prior lines that might be incomplete
@@ -307,6 +423,17 @@ class HdfsStore(pushdown: Pushdown,
     RowIteratorFactory.getIterator(getReader(partition, offset, length),
                                    pushdown.readSchema,
                                    options.get("format"),
+                                   skipHeader(partition))
+  }
+  /** Returns an Iterator over InternalRow for a given Hdfs partition.
+   *
+   * @param partition the partition to read
+   * @return a new CsvRowIterator for this partition.
+   */
+  def getRowIterParquet(partition: HdfsPartition): Iterator[InternalRow] = {
+    RowIteratorFactory.getIterator(getReader(partition, 0, 0),
+                                   pushdown.readSchema,
+                                   "csv",
                                    skipHeader(partition))
   }
 }
