@@ -15,8 +15,7 @@
  * limitations under the License.
  */
 
-
-package org.apache.spark.sql.execution.datasources.parquet;
+package org.apache.spark.sql.extension.parquet;
 
 import java.io.File;
 import java.io.IOException;
@@ -53,10 +52,13 @@ import org.apache.parquet.hadoop.metadata.BlockMetaData;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.hadoop.util.ConfigurationUtil;
 import org.apache.parquet.hadoop.util.HadoopInputFile;
+import org.apache.parquet.io.InputFile;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.Types;
 import org.apache.spark.TaskContext;
 import org.apache.spark.TaskContext$;
+import org.apache.spark.sql.execution.datasources.parquet.ParquetToSparkSchemaConverter;
+import org.apache.spark.sql.execution.datasources.parquet.ParquetSchemaConverter;
 import org.apache.spark.sql.internal.SQLConf;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.types.StructType$;
@@ -103,7 +105,7 @@ public abstract class SpecificParquetRecordReaderBase<T> extends RecordReader<Vo
         taskAttemptContext.getConfiguration(), toSetMultiMap(fileMetadata), fileSchema));
     this.requestedSchema = readContext.getRequestedSchema();
     String sparkRequestedSchemaString =
-        configuration.get(ParquetReadSupport$.MODULE$.SPARK_ROW_REQUESTED_SCHEMA());
+        configuration.get(org.apache.spark.sql.execution.datasources.parquet.ParquetReadSupport$.MODULE$.SPARK_ROW_REQUESTED_SCHEMA());
     this.sparkSchema = StructType$.MODULE$.fromString(sparkRequestedSchemaString);
     this.totalRowCount = reader.getFilteredRecordCount();
 
@@ -121,7 +123,26 @@ public abstract class SpecificParquetRecordReaderBase<T> extends RecordReader<Vo
       }
     }
   }
+  public void initialize(InputFile file, TaskAttemptContext taskAttemptContext)
+      throws IOException, InterruptedException {
+    Configuration configuration = taskAttemptContext.getConfiguration();
 
+    ParquetReadOptions options = HadoopReadOptions
+      .builder(configuration)
+      // .withRange(split.getStart(), split.getStart() + split.getLength())
+      .build();
+    this.reader = new ParquetFileReader(file, options);
+    this.fileSchema = reader.getFileMetaData().getSchema();
+    Map<String, String> fileMetadata = reader.getFileMetaData().getKeyValueMetaData();
+    ReadSupport<T> readSupport = getReadSupportInstance(getReadSupportClass(configuration));
+    ReadSupport.ReadContext readContext = readSupport.init(new InitContext(
+        taskAttemptContext.getConfiguration(), toSetMultiMap(fileMetadata), fileSchema));
+    this.requestedSchema = readContext.getRequestedSchema();
+    String sparkRequestedSchemaString =
+        configuration.get(org.apache.spark.sql.execution.datasources.parquet.ParquetReadSupport$.MODULE$.SPARK_ROW_REQUESTED_SCHEMA());
+    this.sparkSchema = StructType$.MODULE$.fromString(sparkRequestedSchemaString);
+    this.totalRowCount = reader.getFilteredRecordCount();
+  }
   /**
    * Returns the list of files at 'path' recursively. This skips files that are ignored normally
    * by MapReduce.

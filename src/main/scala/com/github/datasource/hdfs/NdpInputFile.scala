@@ -50,12 +50,12 @@ class NdpInputFile(fs: FileSystem, stat: FileStatus, conf: Configuration) extend
   override def newStream(): SeekableInputStream = {
     val outBufStream = new ByteArrayOutputStream()
     val data = new Array[Byte](1024*1024)
-    val iStream = fs.open(stat.getPath())
-    var bytesRead = iStream.read(data, 0, data.length)
+    val stream = fs.open(stat.getPath())
+    var bytesRead = stream.read(data, 0, data.length)
 
     while (bytesRead != -1) {
       outBufStream.write(data, 0, bytesRead)
-      bytesRead = iStream.read(data, 0, data.length)
+      bytesRead = stream.read(data, 0, data.length)
     }
     HadoopStreams.wrap(new FSDataInputStream(
               new SeekableByteArrayInputStream(outBufStream.toByteArray())))
@@ -99,7 +99,7 @@ object NdpInputFile {
     conf.set("fs.file.impl", classOf[org.apache.hadoop.fs.LocalFileSystem].getName())
     conf
   }
-  private def getFileSystem(filePath: String): FileSystem = {
+  private def getFileSystem(filePath: String, conf: Configuration): FileSystem = {
     val conf = configuration
     val endpoint = getEndpoint(filePath)
     if (filePath.contains("ndphdfs")) {
@@ -109,9 +109,8 @@ object NdpInputFile {
       FileSystem.get(URI.create(endpoint), conf)
     }
   }
-  def fromPath(path: String) : NdpInputFile = {
-    val conf = configuration
-    val fs: FileSystem = getFileSystem(path)
+  def fromPath(path: String, conf: Configuration) : NdpInputFile = {
+    val fs: FileSystem = getFileSystem(path, conf)
     new NdpInputFile(fs, fs.getFileStatus(new Path(getFilePath(path))), conf)
   }
   def fromStatus(stat: FileStatus, conf: Configuration): NdpInputFile = {

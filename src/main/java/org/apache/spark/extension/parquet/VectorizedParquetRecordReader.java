@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.execution.datasources.parquet;
+package org.apache.spark.sql.extension.parquet;
 
 import java.io.IOException;
 import java.time.ZoneId;
@@ -26,6 +26,7 @@ import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.page.PageReadStore;
+import org.apache.parquet.io.InputFile;
 import org.apache.parquet.schema.Type;
 
 import org.apache.spark.memory.MemoryMode;
@@ -49,7 +50,8 @@ import org.apache.spark.sql.types.StructType;
  * enabled, this class returns ColumnarBatches which offers significant performance gains.
  * TODO: make this always return ColumnarBatches.
  */
-public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBase<Object> {
+public class VectorizedParquetRecordReader extends 
+ org.apache.spark.sql.extension.parquet.SpecificParquetRecordReaderBase<Object> {
 
   // The capacity of vectorized batch.
   private int capacity;
@@ -151,6 +153,16 @@ public class VectorizedParquetRecordReader extends SpecificParquetRecordReaderBa
   public void initialize(InputSplit inputSplit, TaskAttemptContext taskAttemptContext)
       throws IOException, InterruptedException, UnsupportedOperationException {
     super.initialize(inputSplit, taskAttemptContext);
+    initializeInternal();
+  }
+
+  /**
+   * Implementation of RecordReader API.
+   */
+  @Override
+  public void initialize(InputFile inputFile, TaskAttemptContext taskAttemptContext)
+      throws IOException, InterruptedException, UnsupportedOperationException {
+    super.initialize(inputFile, taskAttemptContext);
     initializeInternal();
   }
 

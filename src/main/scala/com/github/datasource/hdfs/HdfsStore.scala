@@ -316,7 +316,7 @@ class HdfsStore(pushdown: Pushdown,
    * @return byte length of the file.
    */
   def getLength(fileName: String) : Long = {
-    val fileToRead = new Path(filePath)
+    val fileToRead = new Path(fileName)
     val fileStatus = fileSystem.getFileStatus(fileToRead)
     fileStatus.getLen
   }
