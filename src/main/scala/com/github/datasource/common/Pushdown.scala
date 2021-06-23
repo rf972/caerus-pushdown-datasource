@@ -48,6 +48,18 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
   protected val logger = LoggerFactory.getLogger(getClass)
 
   protected var supportsIsNull = !options.containsKey("DisableSupportsIsNull")
+
+  def isPushdownNeeded: Boolean = {
+    /* Determines if we should send the pushdown to ndp.
+     * If any of the pushdowns are in use (project, filter, aggregate),
+     * then we will consider that pushdown is needed.
+     */
+    (true || /* FIXME: added for csv/parquet forcing */
+     (prunedSchema.length != schema.length) ||
+     (filters.length > 0) ||
+     (aggregation.aggregateExpressions.length > 0) ||
+     (aggregation.groupByExpressions.length > 0))
+  }
   /**
    * Build a SQL WHERE clause for the given filters. If a filter cannot be pushed down then no
    * condition will be added to the WHERE clause. If none of the filters can be pushed down then

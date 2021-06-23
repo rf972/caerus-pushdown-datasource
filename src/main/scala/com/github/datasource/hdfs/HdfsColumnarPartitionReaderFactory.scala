@@ -16,7 +16,8 @@
  */
 package com.github.datasource.hdfs
 
-// scalastyle:off
+import java.net.URI
+import java.time.ZoneId
 import java.util
 
 import scala.collection.JavaConverters._
@@ -24,11 +25,13 @@ import scala.collection.mutable.{ArrayBuffer}
 
 import com.github.datasource.common.Pushdown
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.BlockLocation
 import org.apache.hadoop.fs.Path
-import org.apache.parquet.HadoopReadOptions
-import org.apache.parquet.hadoop.ParquetFileReader
-import org.apache.parquet.hadoop.util.HadoopInputFile
+import org.apache.hadoop.mapreduce._
+import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
+import org.apache.parquet.filter2.predicate.{FilterApi, FilterPredicate}
+import org.apache.parquet.format.converter.ParquetMetadataConverter.SKIP_ROW_GROUPS
+import org.apache.parquet.hadoop.{ParquetFileReader, ParquetInputFormat}
+import org.apache.parquet.io.InputFile
 import org.dike.hdfs.NdpHdfsFileSystem
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
@@ -39,45 +42,25 @@ import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.scheduler._
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.connector.read._
-import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.sources._
-import org.apache.spark.sql.sources.Aggregation
-import org.apache.spark.sql.types._
-import org.apache.spark.util.SerializableConfiguration
-
-import java.net.URI
-import java.time.ZoneId
-import org.apache.hadoop.fs.Path
-import org.apache.hadoop.mapred.FileSplit
-import org.apache.hadoop.mapreduce._
-import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
-import org.apache.parquet.filter2.compat.FilterCompat
-import org.apache.parquet.filter2.predicate.{FilterApi, FilterPredicate}
-import org.apache.parquet.format.converter.ParquetMetadataConverter.SKIP_ROW_GROUPS
-import org.apache.parquet.hadoop.{ParquetFileReader, ParquetInputFormat, ParquetRecordReader}
-import org.apache.parquet.io.InputFile
-
-import org.apache.spark.TaskContext
-import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.internal.Logging
-import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
+import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader}
 import org.apache.spark.sql.execution.datasources.{DataSourceUtils, PartitionedFile, RecordReaderIterator}
 import org.apache.spark.sql.execution.datasources.parquet.{ParquetReadSupport, ParquetWriteSupport}
-import org.apache.spark.sql.extension.parquet.VectorizedParquetRecordReader
+import org.apache.spark.sql.execution.datasources.parquet.ParquetFilters
 import org.apache.spark.sql.execution.datasources.v2._
+import org.apache.spark.sql.extension.parquet.VectorizedParquetRecordReader
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.internal.SQLConf.LegacyBehaviorPolicy
+import org.apache.spark.sql.sources._
+import org.apache.spark.sql.sources.Aggregation
 import org.apache.spark.sql.sources.Filter
-import org.apache.spark.sql.types.{AtomicType, StructType}
+import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
-import org.apache.spark.sql.extension.parquet._
-// scalastyle:on
 
-/** Creates a factory for creating HdfsPartitionReader objects
+/** Creates a factory for creating HdfsPartitionReader objects,
+ *  for parquet files to be read using ColumnarBatches.
  *
  * @param schema the column format
  * @param options the options including "path"
@@ -86,28 +69,55 @@ import org.apache.spark.sql.extension.parquet._
  * @param pushedAggregation the array of aggregations to push down
  */
 class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
-                                 options: util.Map[String, String],
- sharedConf: Broadcast[org.apache.spark.util.SerializableConfiguration])
+                                         options: util.Map[String, String],
+ sharedConf: Broadcast[org.apache.spark.util.SerializableConfiguration],
+ sqlConf: SQLConf)
   extends PartitionReaderFactory {
   private val logger = LoggerFactory.getLogger(getClass)
+  private val isCaseSensitive = sqlConf.caseSensitiveAnalysis
+  private val enableOffHeapColumnVector = sqlConf.offHeapColumnVectorEnabled
+  private val enableVectorizedReader: Boolean = sqlConf.parquetVectorizedReaderEnabled
+  private val enableRecordFilter: Boolean = sqlConf.parquetRecordFilterEnabled
+  private val timestampConversion: Boolean = sqlConf.isParquetINT96TimestampConversion
+  private val batchSize = sqlConf.parquetVectorizedReaderBatchSize
+  private val enableParquetFilterPushDown: Boolean = sqlConf.parquetFilterPushDown
+  private val pushDownDate = sqlConf.parquetFilterPushDownDate
+  private val pushDownTimestamp = sqlConf.parquetFilterPushDownTimestamp
+  private val pushDownDecimal = sqlConf.parquetFilterPushDownDecimal
+  private val pushDownStringStartWith = sqlConf.parquetFilterPushDownStringStartWith
+  private val pushDownInFilterThreshold = sqlConf.parquetFilterPushDownInFilterThreshold
+  private val datetimeRebaseModeInRead = LegacyBehaviorPolicy.EXCEPTION.toString
+  private val int96RebaseModeInRead = LegacyBehaviorPolicy.EXCEPTION.toString
+
   private val sparkSession: SparkSession = SparkSession
       .builder()
       .appName("ndp")
       .getOrCreate()
-  logger.trace("Created")
+
   override def createReader(partition: InputPartition): PartitionReader[InternalRow] = {
-    new HdfsPartitionReader(pushdown, options, partition.asInstanceOf[HdfsPartition],
-                            sparkSession, sharedConf)
+    throw new UnsupportedOperationException("Cannot create row reader.");
   }
   override def supportColumnarReads(partition: InputPartition): Boolean = true
 
-  private def buildReader(file: PartitionedFile): VectorizedParquetRecordReader = {
+  private def buildReader(partition: HdfsPartition): VectorizedParquetRecordReader = {
     val conf = sharedConf.value.value
-    val filePath = new Path(new URI(file.filePath))
+    val filePath = new Path(new URI(partition.name))
     lazy val footerFileMetaData =
       ParquetFileReader.readFooter(conf, filePath, SKIP_ROW_GROUPS).getFileMetaData
-    // Try to push down filters when filter push-down is enabled.
-    val pushed = None
+    val pushed = if (enableParquetFilterPushDown) {
+      val parquetSchema = footerFileMetaData.getSchema
+      logger.info("parquet file schema: " + parquetSchema.toString)
+      val parquetFilters = new ParquetFilters(parquetSchema, pushDownDate, pushDownTimestamp,
+        pushDownDecimal, pushDownStringStartWith, pushDownInFilterThreshold, isCaseSensitive)
+      pushdown.filters
+        // Collects all converted Parquet filter predicates. Notice that not all predicates can be
+        // converted (`ParquetFilters.createFilter` returns an `Option`). That's why a `flatMap`
+        // is used here.
+        .flatMap(parquetFilters.createFilter)
+        .reduceOption(FilterApi.and)
+    } else {
+      None
+    }
     // PARQUET_INT96_TIMESTAMP_CONVERSION says to apply timezone conversions to int96 timestamps'
     // *only* if the file was created by something other than "parquet-mr", so check the actual
     // writer here for this file.  We have to do this per-file, as each file in the table may
@@ -115,12 +125,11 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
     // Define isCreatedByParquetMr as function to avoid unnecessary parquet footer reads.
     def isCreatedByParquetMr: Boolean =
       footerFileMetaData.getCreatedBy().startsWith("parquet-mr")
-    val convertTz = None /*
-      if (timestampConversion && !isCreatedByParquetMr) {
+    val convertTz = if (timestampConversion && !isCreatedByParquetMr) {
         Some(DateTimeUtils.getZoneId(conf.get(SQLConf.SESSION_LOCAL_TIMEZONE.key)))
       } else {
         None
-      } */
+      }
     val attemptId = new TaskAttemptID(new TaskID(new JobID(), TaskType.MAP, 0), 0)
     val hadoopAttemptContext = new TaskAttemptContextImpl(conf, attemptId)
 
@@ -131,17 +140,20 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
     }
     val datetimeRebaseMode = DataSourceUtils.datetimeRebaseMode(
       footerFileMetaData.getKeyValueMetaData.get,
-      LegacyBehaviorPolicy.EXCEPTION.toString)
+      datetimeRebaseModeInRead)
     val int96RebaseMode = DataSourceUtils.int96RebaseMode(
       footerFileMetaData.getKeyValueMetaData.get,
-      LegacyBehaviorPolicy.EXCEPTION.toString)
+      int96RebaseModeInRead)
     val reader = createParquetVectorizedReader(hadoopAttemptContext,
                                                pushed,
                                                convertTz,
                                                datetimeRebaseMode,
                                                int96RebaseMode)
     // val inputFile = HadoopInputFile.fromPath(new Path(file.filePath), conf)
-    val inputFile = NdpInputFile.fromPath(file.filePath, conf)
+
+    var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options,
+                                                     sparkSession, sharedConf.value.value)
+    val inputFile = HdfsNdpInputFile.fromPath(store, partition)
     reader.initialize(inputFile.asInstanceOf[InputFile], hadoopAttemptContext)
     reader
   }
@@ -152,33 +164,26 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
       datetimeRebaseMode: LegacyBehaviorPolicy.Value,
       int96RebaseMode: LegacyBehaviorPolicy.Value): VectorizedParquetRecordReader = {
     val taskContext = Option(TaskContext.get())
-    /* We changed the below to be default values just like is done inside of
-     * parquetPartitionReaderFactory.
-     */
-    val enableOffHeapColumnVector = false
-    val capacity = 4*1024 // batch size
     val vectorizedReader = new VectorizedParquetRecordReader(
       convertTz.orNull,
       datetimeRebaseMode.toString,
       int96RebaseMode.toString,
       enableOffHeapColumnVector && taskContext.isDefined,
-      capacity)
+      batchSize)
     val iter = new RecordReaderIterator(vectorizedReader)
     // SPARK-23457 Register a task completion listener before `initialization`.
     taskContext.foreach(_.addTaskCompletionListener[Unit](_ => iter.close()))
     vectorizedReader
   }
-  private def createVectorizedReader(file: PartitionedFile): VectorizedParquetRecordReader = {
-    val vectorizedReader = buildReader(file)
+  private def createVectorizedReader(partition: HdfsPartition): VectorizedParquetRecordReader = {
+    val vectorizedReader = buildReader(partition)
       .asInstanceOf[VectorizedParquetRecordReader]
-    vectorizedReader.initBatch(new StructType(Array.empty[StructField]), file.partitionValues)
+    vectorizedReader.initBatch(new StructType(Array.empty[StructField]), InternalRow.empty)
     vectorizedReader
   }
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
     val part = partition.asInstanceOf[HdfsPartition]
-    val file = PartitionedFile(InternalRow.empty, part.name,
-                               0, part.length)
-    val vectorizedReader = createVectorizedReader(file)
+    val vectorizedReader = createVectorizedReader(part)
     vectorizedReader.enableReturningBatches()
 
     new PartitionReader[ColumnarBatch] {
@@ -228,7 +233,6 @@ object HdfsColumnarReaderFactory {
     /* Our own config tweaks.
      */
     conf.value.value.set("io.file.buffer.size", s"${1024 * 1024}")
-    conf.value.value.set("fs.ndphdfs.impl", classOf[org.dike.hdfs.NdpHdfsFileSystem].getName)
     conf
   }
 }

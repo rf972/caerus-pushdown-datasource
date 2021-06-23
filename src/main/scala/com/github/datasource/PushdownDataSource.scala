@@ -22,14 +22,19 @@ import java.util.HashMap
 import scala.collection.JavaConverters._
 
 import com.github.datasource.common.Pushdown
-import com.github.datasource.hdfs.{HdfsScan, HdfsStore}
+import com.github.datasource.hdfs.{HdfsNdpInputFile, HdfsScan, HdfsStore}
 import com.github.datasource.s3.{S3Scan, S3Store}
+import org.apache.hadoop.fs.FileStatus
+import org.apache.hadoop.fs.FileSystem
+import org.apache.hadoop.fs.Path
 import org.slf4j.LoggerFactory
 
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.connector.catalog.{SessionConfigSupport, SupportsRead,
                                                Table, TableCapability, TableProvider}
 import org.apache.spark.sql.connector.expressions.Transform
 import org.apache.spark.sql.connector.read._
+import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.sources.Aggregation
 import org.apache.spark.sql.sources.DataSourceRegister
@@ -47,8 +52,22 @@ class DefaultSource extends TableProvider
   override def toString: String = s"PushdownDataSource()"
   override def supportsExternalMetadata(): Boolean = true
 
+  private val sparkSession: SparkSession = SparkSession
+      .builder()
+      .getOrCreate()
+
   override def inferSchema(options: CaseInsensitiveStringMap): StructType = {
-    throw new IllegalArgumentException("requires a user-supplied schema")
+    if (options.get("format") == "parquet") {
+      /* With parquet, we infer the schema from the metadata.
+       */
+      val path = options.get("path")
+      val fileStatusArray = HdfsStore.getFileStatusList(path)
+      val schema = ParquetUtils.inferSchema(sparkSession, options.asScala.toMap, fileStatusArray)
+      schema.get
+    } else {
+      /* Other types like CSV require a user-supplied schema */
+      throw new IllegalArgumentException("requires a user-supplied schema")
+    }
   }
 
   override def getTable(schema: StructType,
@@ -187,7 +206,7 @@ class PushdownScanBuilder(schema: StructType,
   /** Will push down a list of aggregates to be saved and sent to
    *  the endpoint on all reads.
    *  Note that "DisableAggregatePush" option will prevent any pushes.
-   * @param aggregation list of aggreates, assupmtion is that
+   * @param aggregation list of aggreates, assumption is that
    *                    these are "and" separated.
    */
   override def pushAggregation(aggregation: Aggregation): Unit = {

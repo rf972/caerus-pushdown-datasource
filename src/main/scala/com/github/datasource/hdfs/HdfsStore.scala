@@ -34,6 +34,7 @@ import org.apache.commons.io.IOUtils
 import org.apache.commons.io.input.BoundedInputStream
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.BlockLocation
+import org.apache.hadoop.fs.FileStatus
 import org.apache.hadoop.fs.FileSystem
 import org.apache.hadoop.fs.FSDataInputStream
 import org.apache.hadoop.fs.Path
@@ -79,7 +80,7 @@ object HdfsStoreFactory {
   def getStore(pushdown: Pushdown,
                options: java.util.Map[String, String],
                sparkSession: SparkSession,
-               sharedConf: Broadcast[org.apache.spark.util.SerializableConfiguration]):
+               sharedConf: Configuration):
       HdfsStore = {
     new HdfsStore(pushdown, options, sparkSession, sharedConf)
   }
@@ -94,20 +95,10 @@ object HdfsStoreFactory {
 class HdfsStore(pushdown: Pushdown,
                 options: java.util.Map[String, String],
                 sparkSession: SparkSession,
-                sharedConf: Broadcast[org.apache.spark.util.SerializableConfiguration]) {
+                sharedConf: Configuration) {
   override def toString() : String = "HdfsStore" + options + pushdown.filters.mkString(", ")
   protected val path = options.get("path")
-  protected val isPushdownNeeded: Boolean = {
-    /* Determines if we should send the pushdown to ndp.
-     * If any of the pushdowns are in use (project, filter, aggregate),
-     * then we will consider that pushdown is needed.
-     */
-    (true || /* FIXME: added for csv/parquet forcing */
-     (pushdown.prunedSchema.length != pushdown.schema.length) ||
-     (pushdown.filters.length > 0) ||
-     (pushdown.aggregation.aggregateExpressions.length > 0) ||
-     (pushdown.aggregation.groupByExpressions.length > 0))
-  }
+  protected val isPushdownNeeded: Boolean = pushdown.isPushdownNeeded
   protected val endpoint = {
     val server = path.split("/")(2)
     if (path.contains("ndphdfs://")) {
@@ -131,11 +122,11 @@ class HdfsStore(pushdown: Pushdown,
   }
   protected val logger = LoggerFactory.getLogger(getClass)
   protected val configure: Configuration = {
-    val conf = new Configuration()
+    /* val conf = new Configuration()
     conf.set("dfs.datanode.drop.cache.behind.reads", "true")
-    conf.set("dfs.client.cache.readahead", "0")
-    conf.set("fs.ndphdfs.impl", classOf[org.dike.hdfs.NdpHdfsFileSystem].getName)
-    conf
+    conf.set("dfs.client.cache.readahead", "0") */
+    sharedConf.set("fs.ndphdfs.impl", classOf[org.dike.hdfs.NdpHdfsFileSystem].getName)
+    sharedConf
   }
   protected val fileSystem = {
     val conf = configure
@@ -148,6 +139,48 @@ class HdfsStore(pushdown: Pushdown,
   }
   protected val fileSystemType = fileSystem.getScheme
 
+  def getQueryParams(partition: HdfsPartition): (String, String) = {
+    if (!isPushdownNeeded ||
+        fileSystemType != "ndphdfs") {
+      ("", "")
+    } else {
+      val (requestQuery, requestSchema) = {
+        logger.info("SQL Query (readable): " + pushdown.getReadableQuery(partition))
+          (pushdown.queryFromSchema(partition),
+          Pushdown.schemaString(pushdown.schema))
+      }
+      options.get("format") match {
+        case "parquet" => (new ProcessorRequestParquet(partition.modifiedTime, partition.index,
+                                requestQuery, partition.length,
+                                headerType).toXml, requestQuery)
+        case _ => (new ProcessorRequest(requestSchema, requestQuery, partition.length,
+                        headerType).toXml, requestQuery)
+      }
+    }
+  }
+  def open(partition: HdfsPartition): InputStream = {
+    val filePath = new Path(partition.name)
+    val (readParam, query) = getQueryParams(partition)
+    logger.info(readParam)
+    /* When we are targeting ndphdfs, but we do not have a pushdown,
+     * we will not pass the processor element.
+     * This allows the NDP server to optimize further.
+     */
+    if (isPushdownNeeded &&
+        fileSystemType == "ndphdfs") {
+        logger.info(s"SQL Query partition: ${partition.toString}")
+        logger.info(s"SQL Query: ${query}")
+        val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
+        val inStrm = fs.open(filePath, 4096, readParam).asInstanceOf[FSDataInputStream]
+        inStrm
+    } else {
+        val inStrm = fileSystem.open(filePath)
+        if (fileSystemType == "ndphdfs") {
+          logger.info(s"No Pushdown to ${fileSystemType} partition: ${partition.toString}")
+        }
+        inStrm
+    }
+  }
   /** Returns a reader for a given Hdfs partition.
    *  Determines the correct start offset by looking backwards
    *  to find the end of the prior line.
@@ -161,29 +194,7 @@ class HdfsStore(pushdown: Pushdown,
   def getReader(partition: HdfsPartition,
                 startOffset: Long = 0, length: Long = 0): BufferedReader = {
     val filePath = new Path(partition.name)
-    val (readParam, query) = {
-      if (!isPushdownNeeded ||
-          fileSystemType != "ndphdfs") {
-        ("", "")
-      } else {
-        val (requestQuery, requestSchema) = {
-          if (fileSystemType == "ndphdfs") {
-            logger.info("SQL Query (readable): " + pushdown.getReadableQuery(partition))
-            (pushdown.queryFromSchema(partition),
-            Pushdown.schemaString(pushdown.schema))
-          } else {
-            ("", "")
-          }
-        }
-        options.get("format") match {
-          case "parquet" => (new ProcessorRequestParquet(partition.modifiedTime, partition.index,
-                                 requestQuery, partition.length,
-                                 headerType).toXml, requestQuery)
-          case _ => (new ProcessorRequest(requestSchema, requestQuery, partition.length,
-                         headerType).toXml, requestQuery)
-        }
-      }
-    }
+    val (readParam, query) = getQueryParams(partition)
     logger.info(readParam)
     /* When we are targeting ndphdfs, but we do not have a pushdown,
      * we will not pass the processor element.
@@ -205,77 +216,6 @@ class HdfsStore(pushdown: Pushdown,
         inStrm.seek(startOffset)
         new BufferedReader(new InputStreamReader(new BoundedInputStream(inStrm, length)))
     }
-  }
-
-  def getDataType(primitiveType: PrimitiveTypeName): DataType = {
-    primitiveType match {
-        case BOOLEAN => BooleanType
-        case INT32 => IntegerType
-        case INT64 => LongType
-        case DOUBLE => DoubleType
-        case FLOAT => FloatType
-        case _ => StringType
-    }
-  }
-  def getDataTypes(parquetMetadata: FileMetaData): Array[DataType] = {
-    val schema = parquetMetadata.getSchema()
-    val types: java.util.List[Type] = schema.asGroupType().getFields()
-    var dataTypes = new Array[DataType](types.size)
-    for (i <- 0 to types.size - 1) {
-      val pType = types.get(i).asPrimitiveType()
-      dataTypes(i) = getDataType(pType.getPrimitiveTypeName())
-    }
-    dataTypes
-  }
-  def getParquetIteratorOld(partition: HdfsPartition): Iterator[InternalRow] = {
-    // sparkSchema = new ParquetToSparkSchemaConverter(config).convert(requestedSchema)
-    // List<ColumnDescriptor> columns = requestedSchema.getColumns();
-    logger.info(s"get reader ${partition.name}")
-    // var hadoopConf: Configuration =
-    //        sparkSession.sessionState.newHadoopConf() // WithOptions(options)
-    val hadoopConf = sharedConf.value.value
-    // hadoopConf.set("io.file.buffer.size", "16777216")
-    val readOptions = HadoopReadOptions.builder(hadoopConf)
-                                       .build()
-    // logger.info(hadoopConf.getPropsWithPrefix("hadoop").toString)
-    // logger.info(hadoopConf.getPropsWithPrefix("io").toString)
-    // Don't forget to pass hadoop Config through
-    // val reader = ParquetFileReader.open(NdpInputFile.fromPath(partition.name), readOptions)
-    val reader = ParquetFileReader.open(
-                   HadoopInputFile.fromPath(new Path(partition.name), hadoopConf), readOptions)
-    val schema = reader.getFileMetaData().getSchema()
-    val types: java.util.List[Type] = schema.asGroupType().getFields()
-    val dataTypes = getDataTypes(reader.getFileMetaData())
-    ParquetRowIterator(reader, dataTypes)
-  }
-  def getParquetIterator(partition: HdfsPartition): Iterator[InternalRow] = {
-
-    val hadoopConf = sharedConf.value.value
-    logger.info(s"get reader ${partition.name}")
-    val readSupport = new ParquetReadSupport(
-      None,
-      false,
-      LegacyBehaviorPolicy.CORRECTED,
-      LegacyBehaviorPolicy.LEGACY)
-      hadoopConf.set(
-      ParquetReadSupport.SPARK_ROW_REQUESTED_SCHEMA,
-      pushdown.schema.json)
-    val reader = new ParquetRecordReader[InternalRow](readSupport)
-    val iter = new RecordReaderIterator[InternalRow](reader)
-    // taskContext.foreach(_.addTaskCompletionListener[Unit](_ => iter.close()))
-    val attemptId = new TaskAttemptID(new TaskID(new JobID(), TaskType.MAP, 0), 0)
-    val hadoopAttemptContext =
-        new TaskAttemptContextImpl(sharedConf.value.value, attemptId)
-    val filePath = new Path(new URI(partition.name))
-    val split = new FileSplit(filePath, 0, partition.length, Array.empty[String])
-    reader.initialize(split, hadoopAttemptContext)
-    /* val attrib = pushdown.schema.map(f => AttributeReference(f.name,
-                                           f.dataType, f.nullable, f.metadata)())
-    val fullSchema = attrib
-    val unsafeProjection = GenerateUnsafeProjection.generate(fullSchema, fullSchema)
-    */
-    iter
-    // iter.map(unsafeProjection)
   }
   /** Returns a list of BlockLocation object representing
    *  all the hdfs blocks in a file.
@@ -426,6 +366,8 @@ class HdfsStore(pushdown: Pushdown,
                                    skipHeader(partition))
   }
   /** Returns an Iterator over InternalRow for a given Hdfs partition.
+   *  This is for the case where our NDP Server returns csv format
+   *  for a parquet file.
    *
    * @param partition the partition to read
    * @return a new CsvRowIterator for this partition.
@@ -443,6 +385,10 @@ class HdfsStore(pushdown: Pushdown,
  */
 object HdfsStore {
 
+  private val sparkSession: SparkSession = SparkSession
+      .builder()
+      .getOrCreate()
+
   /** Returns true if pushdown is supported by this flavor of
    *  filesystem represented by a string of "filesystem://filename".
    *
@@ -452,9 +398,101 @@ object HdfsStore {
   def pushdownSupported(options: util.Map[String, String]): Boolean = {
     if (options.get("path").contains("ndphdfs://")) {
       true
+    } else if (options.get("format").contains("parquet")) {
+      /* Regular hdfs does pushdown in the datasource. */
+      true
     } else {
       // other filesystems like hdfs and webhdfs do not support pushdown.
       false
     }
+  }
+  def getFilePath(filePath: String): String = {
+    val server = filePath.split("/")(2)
+    if (filePath.contains("ndphdfs://")) {
+      val str = filePath.replace("ndphdfs://" + server,
+                                 "ndphdfs://" + server +
+                                 {if (filePath.contains(":9860")) "" else ":9860"})
+      str
+    } else if (filePath.contains("webhdfs")) {
+      filePath.replace(server, server + {if (filePath.contains(":9870")) "" else ":9870"})
+    } else {
+      filePath.replace(server, server + {if (filePath.contains(":9000")) "" else ":9000"})
+    }
+  }
+  /** Returns a list of file names represented by an input file or directory.
+   *
+   * @param fileName the full filename path
+   * @return Map[String, BlockLocation] The Key is the filename
+   *                     the value is the Array of BlockLocation
+   */
+  def getFileList(fileName: String, fileSystem: FileSystem):
+      Seq[String] = {
+    val fileToRead = new Path(getFilePath(fileName))
+    val fileStatus = fileSystem.getFileStatus(fileToRead)
+    var fileArray: Array[String] = Array[String]()
+    if (fileSystem.isFile(fileToRead)) {
+      // Use MaxValue to indicate we want info on all blocks.
+      fileArray = fileArray ++ Array(fileName)
+    } else {
+      /* fileToRead is a directory. So get the contents of this directory.
+       * For each file in the directory create a new map entry with filename as key.
+       */
+      val status = fileSystem.listStatus(fileToRead)
+      for (item <- status) {
+        if (item.isFile && (item.getPath.getName.contains(".csv") ||
+                            item.getPath.getName.contains(".tbl") ||
+                            item.getPath.getName.contains(".parquet"))) {
+          val currentFile = item.getPath.toString
+          fileArray = fileArray ++ Array(currentFile)
+        }
+      }
+    }
+    fileArray.toSeq
+  }
+  private val configuration: Configuration = {
+    val conf = sparkSession.sessionState.newHadoopConf()
+    conf.set("dfs.datanode.drop.cache.behind.reads", "true")
+    conf.set("dfs.client.cache.readahead", "0")
+    conf.set("fs.ndphdfs.impl", classOf[org.dike.hdfs.NdpHdfsFileSystem].getName)
+    conf.set("fs.hdfs.impl", classOf[org.apache.hadoop.hdfs.DistributedFileSystem].getName())
+    conf.set("fs.file.impl", classOf[org.apache.hadoop.fs.LocalFileSystem].getName())
+    conf
+  }
+  private def getEndpoint(path: String): String = {
+    val server = path.split("/")(2)
+    if (path.contains("ndphdfs://")) {
+      ("ndphdfs://" + server + {if (path.contains(":9860")) "" else ":9860"})
+    } else if (path.contains("webhdfs://")) {
+      ("webhdfs://" + server + {if (path.contains(":9870")) "" else ":9870"})
+    } else {
+      ("hdfs://" + server + {if (path.contains(":9000")) "" else ":9000"})
+    }
+  }
+  def getFileSystem(filePath: String): FileSystem = {
+    val conf = configuration
+    getFileSystem(filePath, conf)
+  }
+  def getFileSystem(filePath: String, conf: Configuration): FileSystem = {
+    val endpoint = getEndpoint(filePath)
+    if (filePath.contains("ndphdfs")) {
+      val fs = FileSystem.get(URI.create(endpoint), conf)
+      fs.asInstanceOf[NdpHdfsFileSystem]
+    } else {
+      FileSystem.get(URI.create(endpoint), conf)
+    }
+  }
+  def getFileStatusList(filePath: String): Seq[FileStatus] = {
+      val conf = configuration
+      val fs: FileSystem = getFileSystem(filePath, conf)
+      val files = HdfsStore.getFileList(filePath, fs)
+      val fileStatusArray = {
+        var statusArray = Array[FileStatus]()
+        for (file <- files) {
+          val fileStatus = fs.getFileStatus(new Path(getFilePath(file)))
+          statusArray = statusArray ++ Array(fileStatus)
+        }
+        statusArray.toSeq
+      }
+      fileStatusArray
   }
 }
