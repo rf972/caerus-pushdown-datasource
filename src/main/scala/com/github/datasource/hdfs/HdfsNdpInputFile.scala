@@ -39,6 +39,12 @@ import org.slf4j.LoggerFactory
 
 import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils
 
+/** An InputFile which can interface with the Ndp server.
+ *
+ *  @param store object for opening the stream.
+ *  @param partition the partition to open.
+ *
+ */
 class HdfsNdpInputFile(store: HdfsStore, partition: HdfsPartition) extends InputFile {
   protected val logger = LoggerFactory.getLogger(getClass)
   override def getLength(): Long = {
@@ -69,6 +75,8 @@ class HdfsNdpInputFile(store: HdfsStore, partition: HdfsPartition) extends Input
   }
 }
 
+/** Related methods.
+ */
 object HdfsNdpInputFile {
   protected val logger = LoggerFactory.getLogger(getClass)
 

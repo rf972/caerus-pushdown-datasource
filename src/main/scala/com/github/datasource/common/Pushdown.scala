@@ -395,9 +395,9 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
     var retVal = ""
     val groupByClause = getGroupByClause(aggregation)
     if (whereClause.length == 0) {
-      retVal = s"SELECT $columnList FROM $objectClause s $groupByClause"
+      retVal = s"SELECT $columnList FROM $objectClause $groupByClause"
     } else {
-      retVal = s"SELECT $columnList FROM $objectClause s $whereClause $groupByClause"
+      retVal = s"SELECT $columnList FROM $objectClause $whereClause $groupByClause"
     }
     retVal
   }

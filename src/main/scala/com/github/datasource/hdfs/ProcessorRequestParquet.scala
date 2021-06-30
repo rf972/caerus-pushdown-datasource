@@ -50,8 +50,6 @@ class ProcessorRequestParquet(accessTime: Long,
                        <Query>{scala.xml.PCData(query)}</Query>
                        <RowGroupIndex>{rowGroup}</RowGroupIndex>
                        <LastAccessTime>{accessTime}</LastAccessTime>
-                       <BlockSize>{blockSize}</BlockSize>
-                       <HeaderInfo>{header}</HeaderInfo>
                      </Configuration>
                    </Processor>
         val writer = new StringWriter

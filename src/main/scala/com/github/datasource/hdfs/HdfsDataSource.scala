@@ -64,8 +64,10 @@ class HdfsScan(schema: StructType,
 
   private def init(): Unit = {
     if (options.get("format") == "parquet") {
-      // The default for parquet is to use column names for now.
+      // The default for parquet is to use column names and no casts since
+      // parquet knows what the data types are.
       options.put("useColumnNames", "")
+      options.put("DisableCasts", "")
     }
   }
   init()
@@ -132,7 +134,7 @@ class HdfsScan(schema: StructType,
         for (i <- 0 to parquetBlocks.size - 1) {
           val parquetBlock = parquetBlocks.get(i)
           a += new HdfsPartition(index = i, offset = parquetBlock.getStartingPos,
-                                 length = parquetBlock.getTotalByteSize,
+                                 length = parquetBlock.getCompressedSize,
                                  name = fName,
                                  store.getModifiedTime(fName))
         }

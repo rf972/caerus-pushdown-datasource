@@ -277,7 +277,7 @@ public class VectorizedParquetRecordReader extends
   public void enableReturningBatches() {
     returnColumnarBatch = true;
   }
-
+  public long totalRowCount() { return totalRowCount; }
   /**
    * Advances to the next batch of rows. Returns false if there are no more.
    */

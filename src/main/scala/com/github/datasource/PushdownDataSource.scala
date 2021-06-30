@@ -61,6 +61,7 @@ class DefaultSource extends TableProvider
       /* With parquet, we infer the schema from the metadata.
        */
       val path = options.get("path")
+      // logger.info(s"inferSchema path: ${path}")
       val fileStatusArray = HdfsStore.getFileStatusList(path)
       val schema = ParquetUtils.inferSchema(sparkSession, options.asScala.toMap, fileStatusArray)
       schema.get
@@ -161,6 +162,20 @@ class PushdownScanBuilder(schema: StructType,
       HdfsStore.pushdownSupported(options)
     }
   }
+  /** returns true if filters can be fully pushed down
+   *
+   * @return true if pushdown supported, false otherwise
+   */
+  private def filterPushdownFullySupported(): Boolean = {
+    if (options.get("path").contains("s3a")) {
+      S3Store.pushdownSupported(options)
+    } else {
+      if (!options.get("path").contains("hdfs")) {
+        throw new Exception(s"path ${options.get("path")} is unexpected")
+      }
+      HdfsStore.filterPushdownFullySupported(options)
+    }
+  }
   /** Pushes down the list of columns specified by requiredSchema
    *
    * @param requiredSchema the list of coumns we should use, and prune others.
@@ -194,8 +209,14 @@ class PushdownScanBuilder(schema: StructType,
       logger.trace("compiled filter list: " + f.mkString(", "))
       if (!f.contains(None)) {
         pushedFilter = filters
-        // return empty array to indicate we pushed down all the filters.
-        Array[Filter]()
+        if (filterPushdownFullySupported()) {
+          // return empty array to indicate we pushed down all the filters.
+          Array[Filter]()
+        } else {
+          // In this case we know that we need to re-evaluate the filters
+          // since the pushdown cannot guarantee application of the filter.
+          filters
+        }
       } else {
         logger.info("Not pushing down filters.")
         // If we return all filters it will indicate they need to be re-evaluated.

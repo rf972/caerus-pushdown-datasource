@@ -26,6 +26,7 @@ import scala.collection.mutable.{ArrayBuffer}
 import com.github.datasource.common.Pushdown
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
+import org.apache.hadoop.mapred.FileSplit
 import org.apache.hadoop.mapreduce._
 import org.apache.hadoop.mapreduce.task.TaskAttemptContextImpl
 import org.apache.parquet.filter2.predicate.{FilterApi, FilterPredicate}
@@ -62,11 +63,10 @@ import org.apache.spark.util.SerializableConfiguration
 /** Creates a factory for creating HdfsPartitionReader objects,
  *  for parquet files to be read using ColumnarBatches.
  *
- * @param schema the column format
+ * @param pushdown has all pushdown options.
  * @param options the options including "path"
- * @param filters the array of filters to push down
- * @param prunedSchema the new array of columns after pruning
- * @param pushedAggregation the array of aggregations to push down
+ * @param sharedConf - Hadoop configuration
+ * @param sqlConf - SQL configuration.
  */
 class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
                                          options: util.Map[String, String],
@@ -106,7 +106,7 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
       ParquetFileReader.readFooter(conf, filePath, SKIP_ROW_GROUPS).getFileMetaData
     val pushed = if (enableParquetFilterPushDown) {
       val parquetSchema = footerFileMetaData.getSchema
-      logger.info("parquet file schema: " + parquetSchema.toString)
+      // logger.info("parquet file schema: " + parquetSchema.toString)
       val parquetFilters = new ParquetFilters(parquetSchema, pushDownDate, pushDownTimestamp,
         pushDownDecimal, pushDownStringStartWith, pushDownInFilterThreshold, isCaseSensitive)
       pushdown.filters
@@ -149,12 +149,20 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
                                                convertTz,
                                                datetimeRebaseMode,
                                                int96RebaseMode)
-    // val inputFile = HadoopInputFile.fromPath(new Path(file.filePath), conf)
-
-    var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options,
-                                                     sparkSession, sharedConf.value.value)
-    val inputFile = HdfsNdpInputFile.fromPath(store, partition)
-    reader.initialize(inputFile.asInstanceOf[InputFile], hadoopAttemptContext)
+    if (options.get("path").contains("ndphdfs")) {
+      // In this case we need to use an InputFile based API,
+      // since we need to provide our own stream.
+      var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options,
+                                                       sparkSession, sharedConf.value.value)
+      val inputFile = HdfsNdpInputFile.fromPath(store, partition)
+      reader.initialize(inputFile.asInstanceOf[InputFile], hadoopAttemptContext)
+    } else {
+      // For this case we use a split (one split per partition)
+      val filePath = new Path(new URI(partition.name))
+      val split = new FileSplit(filePath, partition.offset, partition.length, Array.empty[String])
+      // val inputFile = HadoopInputFile.fromPath(new Path(file.filePath), conf)
+      reader.initialize(split, hadoopAttemptContext)
+    }
     reader
   }
   private def createParquetVectorizedReader(
@@ -185,18 +193,54 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
     val part = partition.asInstanceOf[HdfsPartition]
     val vectorizedReader = createVectorizedReader(part)
     vectorizedReader.enableReturningBatches()
-
-    new PartitionReader[ColumnarBatch] {
-      override def next(): Boolean = vectorizedReader.nextKeyValue()
-
-      override def get(): ColumnarBatch =
-        vectorizedReader.getCurrentValue.asInstanceOf[ColumnarBatch]
-
-      override def close(): Unit = vectorizedReader.close()
-    }
+    new HdfsColumnarPartitionReader(vectorizedReader)
   }
 }
 
+/** PartitionReader which returns a ColumnarBatch, and
+ *  is relying on the Vectorized ParquetRecordReader to
+ *  fetch the batches.
+ *
+ * @param vectorizedReader - Already initialized vectorizedReader
+ *                           which provides the data for the PartitionReader.
+ */
+class HdfsColumnarPartitionReader(vectorizedReader: VectorizedParquetRecordReader)
+  extends PartitionReader[ColumnarBatch] {
+  override def next(): Boolean = {
+    vectorizedReader.nextKeyValue()
+  }
+  override def get(): ColumnarBatch = {
+    val batch = vectorizedReader.getCurrentValue.asInstanceOf[ColumnarBatch]
+    batch
+  }
+  override def close(): Unit = vectorizedReader.close()
+}
+class HdfsColumnarPartitionReaderProgress(vectorizedReader: VectorizedParquetRecordReader,
+                                          batchSize: Long, part: HdfsPartition)
+  extends PartitionReader[ColumnarBatch] {
+  private val logger = LoggerFactory.getLogger(getClass)
+  private var index: Long = 0
+  override def next(): Boolean = {
+    logger.info(s"next batch partition: ${part.name} offset: ${part.offset} index: ${index}" +
+                s"rows: ${vectorizedReader.totalRowCount()}")
+    vectorizedReader.nextKeyValue()
+  }
+   private val logSize = (500000 / batchSize) * batchSize
+  override def get(): ColumnarBatch = {
+    val batch = vectorizedReader.getCurrentValue.asInstanceOf[ColumnarBatch]
+    if ((index % logSize) == 0 ||
+        (index + batchSize) >= vectorizedReader.totalRowCount()) {
+      logger.info(s"batch rows: ${vectorizedReader.totalRowCount()} index: ${index} " +
+                  s"offset: ${part.offset} partition: ${part.name}")
+    }
+    index += batchSize
+    batch
+  }
+  override def close(): Unit = vectorizedReader.close()
+}
+
+/** Related routines for HdfsColumnarReaderFactory.
+ */
 object HdfsColumnarReaderFactory {
 
   def getHadoopConf(sparkSession: SparkSession, schema: StructType):
@@ -232,7 +276,7 @@ object HdfsColumnarReaderFactory {
       sparkSession.sessionState.conf.caseSensitiveAnalysis)
     /* Our own config tweaks.
      */
-    conf.value.value.set("io.file.buffer.size", s"${1024 * 1024}")
+    // conf.value.value.set("io.file.buffer.size", s"${1024 * 1024}")
     conf
   }
 }
