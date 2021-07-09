@@ -21,15 +21,26 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.DataFrame
 
 /** Is a suite of testing which exercises the
- *  V2 data source, but using an S3 API against the NDP server.
+ *  V2 data source, but using an S3 API accessing a minio server.
+ *  The purpose of this suite is to make sure that the
+ *  data source supports a known AWS S3 compliant server.
  */
-class DataSourceV2S3NdpSuite extends DataSourceV2Suite {
+class DataSourceV2S3MinioSuite extends DataSourceV2Suite {
 
-  private val s3IpAddr = "dikehdfs:9858"
+  private val s3IpAddr = "minioserver:9000"
+
+  /* For minio, we use an extended set of options,
+   * which includes disabling pushdown for syntax it does not support.
+   */
   override def sparkConf: SparkConf = super.sparkConf
       .set("spark.datasource.pushdown.endpoint", s"http://$s3IpAddr")
       .set("spark.datasource.pushdown.accessKey", System.getProperty("user.name"))
       .set("spark.datasource.pushdown.secretKey", "admin123")
+      .set("spark.datasource.pushdown.DisableGroupbyPush", "")
+      .set("spark.datasource.pushdown.DisableSupportsIsNull", "")
+      .set("spark.datasource.pushdown.DisabledCasts", "NUMERIC")
+      .set("spark.datasource.pushdown.DisableDistinct", "")
+      .set("spark.datasource.pushdown.partitions", "1")
 
   override protected def df() : DataFrame = {
     spark.read

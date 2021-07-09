@@ -30,27 +30,29 @@ import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.DataFrame
 
 /** Is a suite of testing which exercises the
- *  V2 data source, but using an HDFS API.
+ *  V2 data source, but using an HDFS API,
+ *  and a parquet file, but without NDP.
  */
-class DataSourceV2HdfsSuite extends DataSourceV2Suite {
+class DataSourceV2HdfsParquetSuite extends DataSourceV2Suite {
 
+  var host = "dikehdfs"
   /** Returns the dataframe for the sample data
    *  read in through the ndp data source.
    */
   override protected def df(): DataFrame = {
     spark.read
       .format("pushdown")
-      .schema(schema)
-      .option("format", "csv")
       .option("header", "true")
-      .load("ndphdfs://dikehdfs/integer-test/")
+      .option("format", "parquet")
+      .option("DisableAggregatePush", "")
+      .load(s"hdfs://${host}/unit-test-parquet/")
   }
   override protected def dfNoHeader(): DataFrame = {
      spark.read
       .format("com.github.datasource")
-      .schema(schema)
-      .option("format", "csv")
-      .option("header", "false")
-      .load("ndphdfs://dikehdfs/integer-test-noheader/")
+      .option("header", "true")
+      .option("format", "parquet")
+      .option("DisableAggregatePush", "")
+      .load(s"hdfs://${host}/unit-test-parquet/")
   }
 }
