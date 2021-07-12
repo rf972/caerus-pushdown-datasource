@@ -149,9 +149,13 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
                                                convertTz,
                                                datetimeRebaseMode,
                                                int96RebaseMode)
-    if (options.get("path").contains("ndphdfs")) {
+    if (options.get("path").contains("ndphdfs") &&
+        pushdown.isPushdownNeeded) {
       // In this case we need to use an InputFile based API,
       // since we need to provide our own stream.
+      // When pushdown is not needed, we use the
+      // standard HadoopInputFile since we do not need to pushdown
+      // through our custom hdfs API.
       var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options,
                                                        sparkSession, sharedConf.value.value)
       val inputFile = HdfsNdpInputFile.fromPath(store, partition)
@@ -194,6 +198,9 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
     val vectorizedReader = createVectorizedReader(part)
     vectorizedReader.enableReturningBatches()
     new HdfsColumnarPartitionReader(vectorizedReader)
+    // This aternate factory below is identical to the above, but
+    // provides more verbose progress tracking.
+    // new HdfsColumnarPartitionReaderProgress(vectorizedReader, batchSize, part)
   }
 }
 
