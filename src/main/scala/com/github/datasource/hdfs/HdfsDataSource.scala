@@ -171,9 +171,20 @@ class HdfsScan(schema: StructType,
     partitions
   }
   override def createReaderFactory(): PartitionReaderFactory = {
-    if (options.get("path").contains("ndphdfs") &&
-        options.containsKey("outputFormat") &&
-        options.get("outputFormat").contains("csv")) {
+    /* Use the HdfsPartitionReaderFactory in cases where
+     * we will get back text that needs to be parsed.
+     * We also use the text partition reader
+     * in the case of parquet with csv and pushdownNeeded.
+     * When we have parquet csv but no pushdownNeeded,
+     * we will use the ColumnarPartitionReader to avoid the
+     * pushdown alltogether.
+     */
+    if ((options.containsKey("format") &&
+         !options.get("format").contains("parquet")) ||
+        (options.get("path").contains("ndphdfs") &&
+         options.containsKey("outputFormat") &&
+         options.get("outputFormat").contains("csv") &&
+         pushdown.isPushdownNeeded)) {
       new HdfsPartitionReaderFactory(pushdown, options,
                                      broadcastedHadoopConf)
     } else {
