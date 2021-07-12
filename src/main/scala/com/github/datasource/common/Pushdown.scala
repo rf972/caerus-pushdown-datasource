@@ -54,8 +54,7 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
      * If any of the pushdowns are in use (project, filter, aggregate),
      * then we will consider that pushdown is needed.
      */
-    (true || /* FIXME: added for csv/parquet forcing */
-     (prunedSchema.length != schema.length) ||
+    ((prunedSchema.length != schema.length) ||
      (filters.length > 0) ||
      (aggregation.aggregateExpressions.length > 0) ||
      (aggregation.groupByExpressions.length > 0))
@@ -407,9 +406,24 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
   def aggregatePushdownValid(): Boolean = {
     val (compiledAgg, aggDataType) =
       compileAggregates(aggregation.aggregateExpressions)
-    (compiledAgg.isEmpty == false &&
-    (!options.containsKey("DisableGroupbyPush") ||
-      aggregation.groupByExpressions.length == 0))
+    if (compiledAgg.isEmpty == false) {
+      var valid = true
+      /* Disable aggregate pushdown if it contains distinct,
+       * and if the DisableDistinct option is set.
+       */
+      if (options.containsKey("DisableDistinct")) {
+        for (agg <- compiledAgg) {
+          if (agg.contains("DISTINCT")) {
+            valid = false
+          }
+        }
+      }
+      ((!options.containsKey("DisableGroupbyPush") ||
+        aggregation.groupByExpressions.length == 0) &&
+       valid)
+    } else {
+      true
+    }
   }
   val (readColumns: String,
        readSchema: StructType) = {
