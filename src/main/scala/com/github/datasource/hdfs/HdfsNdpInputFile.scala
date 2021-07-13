@@ -47,8 +47,9 @@ import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils
  */
 class HdfsNdpInputFile(store: HdfsStore, partition: HdfsPartition) extends InputFile {
   protected val logger = LoggerFactory.getLogger(getClass)
+  var length: Long = 0
   override def getLength(): Long = {
-   partition.length
+    length
   }
   /* def newStreamDefault(): SeekableInputStream = {
     val iStream = fs.open(stat.getPath())
@@ -62,10 +63,12 @@ class HdfsNdpInputFile(store: HdfsStore, partition: HdfsPartition) extends Input
     // val stream = fs.open(stat.getPath())
     val stream = store.open(partition)
     var bytesRead = stream.read(data, 0, data.length)
+    length += bytesRead
 
     while (bytesRead != -1) {
       outBufStream.write(data, 0, bytesRead)
       bytesRead = stream.read(data, 0, data.length)
+      length += bytesRead
     }
     HadoopStreams.wrap(new FSDataInputStream(
               new SeekableByteArrayInputStream(outBufStream.toByteArray())))

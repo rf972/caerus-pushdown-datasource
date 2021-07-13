@@ -159,7 +159,9 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
       var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options,
                                                        sparkSession, sharedConf.value.value)
       val inputFile = HdfsNdpInputFile.fromPath(store, partition)
-      reader.initialize(inputFile.asInstanceOf[InputFile], hadoopAttemptContext)
+      if (inputFile.length != 0) {
+        reader.initialize(inputFile.asInstanceOf[InputFile], hadoopAttemptContext)
+      }
     } else {
       // For this case we use a split (one split per partition)
       val filePath = new Path(new URI(partition.name))
@@ -190,18 +192,54 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
   private def createVectorizedReader(partition: HdfsPartition): VectorizedParquetRecordReader = {
     val vectorizedReader = buildReader(partition)
       .asInstanceOf[VectorizedParquetRecordReader]
-    vectorizedReader.initBatch(new StructType(Array.empty[StructField]), InternalRow.empty)
+    if (vectorizedReader.totalRowCount != 0) {
+      vectorizedReader.initBatch(new StructType(Array.empty[StructField]), InternalRow.empty)
+    }
     vectorizedReader
   }
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
     val part = partition.asInstanceOf[HdfsPartition]
     val vectorizedReader = createVectorizedReader(part)
-    vectorizedReader.enableReturningBatches()
-    new HdfsColumnarPartitionReader(vectorizedReader)
-    // This aternate factory below is identical to the above, but
+    if (vectorizedReader.totalRowCount != 0) {
+      vectorizedReader.enableReturningBatches()
+      new HdfsColumnarPartitionReader(vectorizedReader)
+    } else {
+      /* If the row count is zero, it means that no result was
+       * returned from ndp.  In this case, just use an
+       * empty column reader so as not to give
+       * an empty file to parquet-mr, which will result in error
+       * due to an invalid parquet file (no footer).
+       */
+      logger.info("Using empty columnar partition reader " +
+                  part.name + " offset: " + part.offset)
+      new HdfsEmptyColumnarPartitionReader(vectorizedReader)
+    }
+    // This alternate factory below is identical to the above, but
     // provides more verbose progress tracking.
     // new HdfsColumnarPartitionReaderProgress(vectorizedReader, batchSize, part)
   }
+}
+
+/** PartitionReader which returns an empty ColumnarBatch.
+ *  This is needed to satisfy the API which needs a ColumnarBatch,
+ *  while also handling the case where NDP does not return
+ *  any data for the batch query.  Normally we are guaranteed or 
+ *  at least assumed to have a valid parquet file, but with NDP,
+ *  when no rows match, it returns an empty file which we need to handle.
+ *
+ * @param vectorizedReader - Already initialized vectorizedReader
+ *                           which provides the data for the PartitionReader.
+ */
+class HdfsEmptyColumnarPartitionReader(vectorizedReader: VectorizedParquetRecordReader)
+  extends PartitionReader[ColumnarBatch] {
+  override def next(): Boolean = {
+    false
+  }
+  override def get(): ColumnarBatch = {
+    val batch = vectorizedReader.getCurrentValue.asInstanceOf[ColumnarBatch]
+    batch
+  }
+  override def close(): Unit = vectorizedReader.close()
 }
 
 /** PartitionReader which returns a ColumnarBatch, and
