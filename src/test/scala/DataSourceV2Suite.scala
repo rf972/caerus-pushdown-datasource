@@ -30,11 +30,6 @@ import org.apache.spark.sql.types._
  */
 abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   import testImplicits._
-  private val s3IpAddr = "dikehdfs"
-  override def sparkConf: SparkConf = super.sparkConf
-      .set("spark.datasource.pushdown.endpoint", s"http://$s3IpAddr:9858")
-      .set("spark.datasource.pushdown.accessKey", "admin")
-      .set("spark.datasource.pushdown.secretKey", "admin123")
 
   protected val schema = new StructType()
        .add("i", IntegerType, true)
@@ -57,20 +52,28 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
     val s = spark
     import s.implicits._
     val testDF = dataValues.toSeq.toDF("i", "j", "k")
+    /* Write a CSV file both with and without header.
+     */
     testDF.select("*").repartition(1)
       .write.mode("overwrite")
       .option("delimiter", ",")
       .format("csv")
       .option("header", "true")
       .option("partitions", "1")
-      .save("hdfs://dikehdfs:9000/integer-test")
+      .save("hdfs://dikehdfs:9000/unit-test-csv")
     testDF.select("*").repartition(1)
       .write.mode("overwrite")
       .option("delimiter", ",")
       .format("csv")
       .option("header", "false")
       .option("partitions", "1")
-      .save("hdfs://dikehdfs:9000/integer-test-noheader")
+      .save("hdfs://dikehdfs:9000/unit-test-csv-noheader")
+    /* Write Parquet file. */
+    testDF.select("*").repartition(1)
+      .write.mode("overwrite")
+      .format("parquet")
+      .option("partitions", "1")
+      .save("hdfs://dikehdfs:9000/unit-test-parquet")
   }
   private val dataValues = Seq((0, 5, 1), (1, 10, 2), (2, 5, 1),
                                (3, 10, 2), (4, 5, 1), (5, 10, 2), (6, 5, 1))
@@ -87,6 +90,8 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   override def beforeAll(): Unit = {
     super.beforeAll()
     spark.sparkContext.setLogLevel("WARN")
+    // spark.sparkContext.setLogLevel("INFO")
+    // spark.sparkContext.setLogLevel("TRACE")
     initData()
     df.createOrReplaceTempView("integers")
     dfNoHeader.createOrReplaceTempView("integersNoHeader")
@@ -152,7 +157,7 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
     checkAnswer(df.agg(sum("i"), min("i"), max("i"), avg("i")),
                 Seq(Row(21, 0, 6, 3.0)))
   }
-  test("aggregate") {
+  test("aggregate groupby") {
     checkAnswer(sql("SELECT sum(i) FROM integers GROUP BY j"),
                 Seq(Row(12), Row(9)))
     checkAnswer(df.groupBy("j").agg(sum("i")),
@@ -173,8 +178,8 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   test("aggregate distinct") {
     checkAnswer(sql("SELECT SUM(j) FROM integers WHERE i > 0"), Seq(Row(45)))
     checkAnswer(sql("SELECT SUM(DISTINCT j) FROM integers WHERE i > 0"), Seq(Row(15)))
-    checkAnswer(sql("SELECT AVG(j) FROM integers"),
-                Seq(Row(7.14285714285714)))
+    checkAnswer(sql("SELECT CAST(AVG(j) AS DECIMAL(5,2)) FROM integers"),
+                Seq(Row(7.14))) // 7.14285714285714
     checkAnswer(sql("SELECT AVG(DISTINCT j) FROM integers"),
                 Seq(Row(7.5)))
   }
@@ -201,7 +206,7 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
                     " GROUP BY j"),
                 Seq(Row(18), Row(24)))
   }
-    test ("aggregate count") {
+  test ("aggregate count") {
     checkAnswer(sql("SELECT count(*) FROM integers"),
                 Seq(Row(7)))
     checkAnswer(sql("SELECT count(i) FROM integers"),

@@ -48,6 +48,17 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
   protected val logger = LoggerFactory.getLogger(getClass)
 
   protected var supportsIsNull = !options.containsKey("DisableSupportsIsNull")
+
+  def isPushdownNeeded: Boolean = {
+    /* Determines if we should send the pushdown to ndp.
+     * If any of the pushdowns are in use (project, filter, aggregate),
+     * then we will consider that pushdown is needed.
+     */
+    ((prunedSchema.length != schema.length) ||
+     (filters.length > 0) ||
+     (aggregation.aggregateExpressions.length > 0) ||
+     (aggregation.groupByExpressions.length > 0))
+  }
   /**
    * Build a SQL WHERE clause for the given filters. If a filter cannot be pushed down then no
    * condition will be added to the WHERE clause. If none of the filters can be pushed down then
@@ -383,9 +394,9 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
     var retVal = ""
     val groupByClause = getGroupByClause(aggregation)
     if (whereClause.length == 0) {
-      retVal = s"SELECT $columnList FROM $objectClause s $groupByClause"
+      retVal = s"SELECT $columnList FROM $objectClause $groupByClause"
     } else {
-      retVal = s"SELECT $columnList FROM $objectClause s $whereClause $groupByClause"
+      retVal = s"SELECT $columnList FROM $objectClause $whereClause $groupByClause"
     }
     retVal
   }
@@ -395,9 +406,24 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
   def aggregatePushdownValid(): Boolean = {
     val (compiledAgg, aggDataType) =
       compileAggregates(aggregation.aggregateExpressions)
-    (compiledAgg.isEmpty == false &&
-    (!options.containsKey("DisableGroupbyPush") ||
-      aggregation.groupByExpressions.length == 0))
+    if (compiledAgg.isEmpty == false) {
+      var valid = true
+      /* Disable aggregate pushdown if it contains distinct,
+       * and if the DisableDistinct option is set.
+       */
+      if (options.containsKey("DisableDistinct")) {
+        for (agg <- compiledAgg) {
+          if (agg.contains("DISTINCT")) {
+            valid = false
+          }
+        }
+      }
+      ((!options.containsKey("DisableGroupbyPush") ||
+        aggregation.groupByExpressions.length == 0) &&
+       valid)
+    } else {
+      true
+    }
   }
   val (readColumns: String,
        readSchema: StructType) = {

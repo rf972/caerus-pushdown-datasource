@@ -17,34 +17,40 @@
 
 package com.github.datasource.test
 
-import org.apache.spark.SparkConf
+import java.io.{BufferedWriter, OutputStreamWriter}
+import java.net.URI
+import java.nio.charset.StandardCharsets
+
+import org.apache.commons.io.IOUtils
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.FileSystem
+import org.apache.hadoop.fs.FSDataOutputStream
+import org.apache.hadoop.fs.Path
+
 import org.apache.spark.sql.DataFrame
 
 /** Is a suite of testing which exercises the
- *  V2 data source, but using an S3 API against the NDP server.
+ *  V2 data source, but using an HDFS API.
  */
-class DataSourceV2S3NdpSuite extends DataSourceV2Suite {
+class DataSourceV2HdfsCsvSuite extends DataSourceV2Suite {
 
-  private val s3IpAddr = "dikehdfs:9858"
-  override def sparkConf: SparkConf = super.sparkConf
-      .set("spark.datasource.pushdown.endpoint", s"http://$s3IpAddr")
-      .set("spark.datasource.pushdown.accessKey", System.getProperty("user.name"))
-      .set("spark.datasource.pushdown.secretKey", "admin123")
-
-  override protected def df() : DataFrame = {
-    spark.read
-      .format("com.github.datasource")
-      .schema(schema)
-      .option("format", "csv")
-      .option("header", "true")
-      .load("s3a://unit-test-csv/")
-  }
-  override protected def dfNoHeader() : DataFrame = {
+  /** Returns the dataframe for the sample data
+   *  read in through the ndp data source.
+   */
+  override protected def df(): DataFrame = {
     spark.read
       .format("pushdown")
       .schema(schema)
       .option("format", "csv")
+      .option("header", "true")
+      .load("ndphdfs://dikehdfs/unit-test-csv/")
+  }
+  override protected def dfNoHeader(): DataFrame = {
+     spark.read
+      .format("com.github.datasource")
+      .schema(schema)
+      .option("format", "csv")
       .option("header", "false")
-      .load("s3a://unit-test-csv-noheader/")
+      .load("ndphdfs://dikehdfs/unit-test-csv-noheader/")
   }
 }

@@ -55,6 +55,7 @@ class S3Client(options: java.util.Map[String, String]) {
                                                       .withTcpKeepAlive(true)
                                                       .withClientExecutionTimeout(24 * 3600 * 1000))
     .build()
+  def getEndpoint(): String = options.get("endpoint")
   /** returns the current s3 singelton object
    *
    * @return AmazonS3 the s3 singleton object we saved.
@@ -75,8 +76,12 @@ object S3Client {
    *          We expect the user to simply call .getClient on this returned object.
    */
   def apply(options: java.util.Map[String, String]): S3Client = {
-    if (s3Client == None) {
-        logger.info(s"Created new S3 client")
+    // Create new client if there is none, or if the
+    // endpoint differs from the old one.
+    // Makes strong assumption that only one endpoint is used
+    // at any one time, which is a limitation.
+    if (s3Client == None || options.get("endpoint") != s3Client.get.getEndpoint) {
+        logger.info(s"Created new S3 client " + options.get("endpoint"))
         s3Client = Some(new S3Client(options))
         s3Client.get
     } else {
