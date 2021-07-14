@@ -223,7 +223,7 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
 /** PartitionReader which returns an empty ColumnarBatch.
  *  This is needed to satisfy the API which needs a ColumnarBatch,
  *  while also handling the case where NDP does not return
- *  any data for the batch query.  Normally we are guaranteed or 
+ *  any data for the batch query.  Normally we are guaranteed or
  *  at least assumed to have a valid parquet file, but with NDP,
  *  when no rows match, it returns an empty file which we need to handle.
  *
