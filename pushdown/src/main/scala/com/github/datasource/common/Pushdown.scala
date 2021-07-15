@@ -42,7 +42,6 @@ import org.apache.spark.sql.types._
  */
 class Pushdown(val schema: StructType, val prunedSchema: StructType,
                val filters: Seq[Filter],
-               val aggregation: Aggregation,
                val options: util.Map[String, String]) extends Serializable {
 
   protected val logger = LoggerFactory.getLogger(getClass)
@@ -51,13 +50,11 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
 
   def isPushdownNeeded: Boolean = {
     /* Determines if we should send the pushdown to ndp.
-     * If any of the pushdowns are in use (project, filter, aggregate),
+     * If any of the pushdowns are in use (project, filter),
      * then we will consider that pushdown is needed.
      */
     ((prunedSchema.length != schema.length) ||
-     (filters.length > 0) ||
-     (aggregation.aggregateExpressions.length > 0) ||
-     (aggregation.groupByExpressions.length > 0))
+     (filters.length > 0))
   }
   /**
    * Build a SQL WHERE clause for the given filters. If a filter cannot be pushed down then no
@@ -160,19 +157,15 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
    */
   def getColumnSchema(): (String, StructType) = {
 
-    val (compiledAgg, aggDataType) = compileAggregates(aggregation.aggregateExpressions)
     val sb = new StringBuilder()
     val columnNames = prunedSchema.map(_.name).toArray
     var updatedSchema: StructType = new StructType()
-    if (compiledAgg.length == 0) {
-      val cols = prunedSchema.fields.map(x => {
+
+    val cols = prunedSchema.fields.map(x => {
             getColString(x.name)
         }).toArray
-      updatedSchema = prunedSchema
-      cols.foreach(x => sb.append(",").append(x))
-    } else {
-      updatedSchema = getAggregateColumnsList(sb, compiledAgg, aggDataType)
-    }
+    updatedSchema = prunedSchema
+    cols.foreach(x => sb.append(",").append(x))
     (if (sb.length == 0) "" else sb.substring(1),
      if (sb.length == 0) prunedSchema else updatedSchema)
   }
@@ -180,59 +173,6 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
     col.contains("+") || col.contains("-") ||
     col.contains("*") || col.contains("/") ||
     col.contains("(") || col.contains(")")
-
-  /** Returns an array of aggregates translated to strings.
-   *
-   * @param aggregates the array of aggregates to translate
-   * @return array of strings
-   */
-  def compileAggregates(aggregates: Seq[AggregateFunc]) : (Array[String], Array[DataType]) = {
-    def quote(colName: String): String = quoteIdentifier(colName)
-    val aggBuilder = ArrayBuilder.make[String]
-    val dataTypeBuilder = ArrayBuilder.make[DataType]
-    aggregates.map {
-      case Min(column, dataType) =>
-        dataTypeBuilder += dataType
-        if (!containsArithmeticOp(column)) {
-          aggBuilder += s"MIN(${quote(column)})"
-        } else {
-          aggBuilder += s"MIN(${quoteEachCols(column)})"
-        }
-      case Max(column, dataType) =>
-        dataTypeBuilder += dataType
-        if (!containsArithmeticOp(column)) {
-          aggBuilder += s"MAX(${quote(column)})"
-        } else {
-          aggBuilder += s"MAX(${quoteEachCols(column)})"
-        }
-      case Sum(column, dataType, isDistinct) =>
-        val distinct = if (isDistinct) "DISTINCT " else ""
-        dataTypeBuilder += dataType
-        if (!containsArithmeticOp(column)) {
-          aggBuilder += s"SUM(${distinct} ${quote(column)})"
-        } else {
-          aggBuilder += s"SUM(${distinct}${quoteEachCols(column)})"
-        }
-      case Avg(column, dataType, isDistinct) =>
-        val distinct = if (isDistinct) "DISTINCT " else ""
-        dataTypeBuilder += dataType
-        if (!containsArithmeticOp(column)) {
-          aggBuilder += s"AVG(${distinct} ${quote(column)})"
-        } else {
-          aggBuilder += s"AVG(${distinct}${quoteEachCols(column)})"
-        }
-      case Count(column, dataType, isDistinct) =>
-        val distinct = if (isDistinct) "DISTINCT " else ""
-        dataTypeBuilder += dataType
-        if (!containsArithmeticOp(column)) {
-          aggBuilder += s"COUNT(${distinct}${quote(column)})"
-        } else {
-          aggBuilder += s"COUNT(${distinct}${quoteEachCols(column)})"
-        }
-      case _ =>
-    }
-    (aggBuilder.result, dataTypeBuilder.result)
-  }
 
   private def quoteEachCols (column: String): String = {
     def quote(colName: String): String = quoteIdentifier(colName)
@@ -243,28 +183,6 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
       colsBuilder += quote(st.nextToken().trim)
     }
     colsBuilder.result.mkString(" ")
-  }
-  private def getAggregateColumnsList(sb: StringBuilder,
-                                      compiledAgg: Array[String],
-                                      aggDataType: Array[DataType]) = {
-    val columnNames = prunedSchema.map(_.name).toArray
-    val quotedColumns: Array[String] =
-      columnNames.map(colName => quoteIdentifier(colName.toLowerCase(Locale.ROOT)))
-    val colDataTypeMap: Map[String, StructField] = quotedColumns.zip(prunedSchema.fields).toMap
-    val newColsBuilder = ArrayBuilder.make[String]
-    var updatedSchema: StructType = new StructType()
-
-    for ((col, dataType) <- compiledAgg.zip(aggDataType)) {
-      newColsBuilder += col
-      updatedSchema = updatedSchema.add(col, dataType)
-    }
-    for (groupBy <- aggregation.groupByExpressions) {
-      val quotedGroupBy = quoteIdentifier(groupBy)
-      newColsBuilder += quotedGroupBy
-      updatedSchema = updatedSchema.add(colDataTypeMap.get(quotedGroupBy).get)
-    }
-    sb.append(", ").append(newColsBuilder.result.mkString(", "))
-    updatedSchema
   }
 
   private def contains(s1: String, s2: String, checkParathesis: Boolean): Boolean = {
@@ -281,14 +199,6 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
 
   def quoteIdentifierGroupBy(colName: String): String = {
     s"${getColString(colName)}"
-  }
-  private def getGroupByClause(aggregation: Aggregation): String = {
-    if (aggregation.groupByExpressions.length > 0) {
-      val quotedColumns = aggregation.groupByExpressions.map(quoteIdentifierGroupBy)
-      s"GROUP BY ${quotedColumns.mkString(", ")}"
-    } else {
-      ""
-    }
   }
 
   /** returns the representation of the column name according to the
@@ -392,38 +302,13 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
     val whereClause = buildWhereClause()
     val objectClause = partition.getObjectClause(partition)
     var retVal = ""
-    val groupByClause = getGroupByClause(aggregation)
+    val groupByClause = "" // getGroupByClause(aggregation)
     if (whereClause.length == 0) {
       retVal = s"SELECT $columnList FROM $objectClause $groupByClause"
     } else {
       retVal = s"SELECT $columnList FROM $objectClause $whereClause $groupByClause"
     }
     retVal
-  }
-  /** Determines if we can push down this aggregate operation.
-   *  @return Boolean true if valid, false otherwise
-   */
-  def aggregatePushdownValid(): Boolean = {
-    val (compiledAgg, aggDataType) =
-      compileAggregates(aggregation.aggregateExpressions)
-    if (compiledAgg.isEmpty == false) {
-      var valid = true
-      /* Disable aggregate pushdown if it contains distinct,
-       * and if the DisableDistinct option is set.
-       */
-      if (options.containsKey("DisableDistinct")) {
-        for (agg <- compiledAgg) {
-          if (agg.contains("DISTINCT")) {
-            valid = false
-          }
-        }
-      }
-      ((!options.containsKey("DisableGroupbyPush") ||
-        aggregation.groupByExpressions.length == 0) &&
-       valid)
-    } else {
-      true
-    }
   }
   val (readColumns: String,
        readSchema: StructType) = {
@@ -446,7 +331,7 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
     optionsCopy.put("useColumnNames", "")
     optionsCopy.put("DisableCasts", "")
     val pd = new Pushdown(schema, prunedSchema,
-                          filters, aggregation,
+                          filters,
                           optionsCopy)
     pd.queryFromSchema(partition)
   }

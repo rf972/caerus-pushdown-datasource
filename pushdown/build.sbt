@@ -20,7 +20,7 @@ organization := ""
 version := "0.1.0"
 scalaVersion := "2.12.10"
 
-val sparkVersion = "3.0.0"
+val sparkVersion = "3.1.1"
 
 // We want to execute the tests serially.
 Global / concurrentRestrictions += Tags.limit(Tags.Test, 1)
@@ -45,6 +45,18 @@ libraryDependencies ++= Seq(
   "org.slf4j" % "slf4j-simple" % "1.7.21" % Test,
   "org.apache.logging.log4j" % "log4j-api" % "2.14.0",
   "org.apache.logging.log4j" % "log4j-core" % "2.14.0",
+)
+libraryDependencies ++= Seq(
+  "org.apache.spark" %% "spark-core" % sparkVersion,
+  "org.apache.spark" %% "spark-sql" % sparkVersion,
+  "org.apache.spark" %% "spark-catalyst" % sparkVersion
+)
+val parquetMrVersion = "1.12.0"
+libraryDependencies ++= Seq(
+  "org.apache.parquet" % "parquet-common" % parquetMrVersion,
+  "org.apache.parquet" % "parquet-column" % parquetMrVersion,
+  "org.apache.parquet" % "parquet-hadoop" % parquetMrVersion,
+  "org.apache.parquet" % "parquet-encoding" % parquetMrVersion,
 )
 lazy val compileScalastyle = taskKey[Unit]("compileScalastyle")
 

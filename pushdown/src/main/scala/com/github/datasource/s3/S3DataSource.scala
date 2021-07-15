@@ -37,12 +37,10 @@ import org.apache.spark.sql.types._
  * @param options the options including "path"
  * @param filters the array of filters to push down
  * @param prunedSchema the new array of columns after pruning
- * @param pushedAggregation the array of aggregations to push down
  */
 class S3Scan(schema: StructType,
              options: util.Map[String, String],
-             filters: Array[Filter], prunedSchema: StructType,
-             pushedAggregation: Aggregation)
+             filters: Array[Filter], prunedSchema: StructType)
       extends Scan with Batch {
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -51,7 +49,7 @@ class S3Scan(schema: StructType,
   override def toBatch: Batch = this
 
   protected val pushdown = new Pushdown(schema, prunedSchema, filters,
-                                      pushedAggregation, options)
+                                        options)
   private val spark = SparkSession.builder()
                                   .getOrCreate()
   private val maxPartBytes: Long = spark.sessionState.conf.filesMaxPartitionBytes
@@ -140,7 +138,7 @@ class S3Scan(schema: StructType,
 
 /** Creates a factory for creating S3PartitionReader objects
  *
- * @param pushdown object handling filter, project and aggregate pushdown
+ * @param pushdown object handling filter, project, pushdown
  * @param options the options including "path"
  */
 class S3PartitionReaderFactory(pushdown: Pushdown,

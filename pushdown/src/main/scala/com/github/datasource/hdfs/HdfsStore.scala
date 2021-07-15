@@ -64,7 +64,7 @@ import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.execution.datasources.RecordReaderIterator
 import org.apache.spark.sql.execution.datasources.parquet._
 import org.apache.spark.sql.internal.SQLConf.LegacyBehaviorPolicy
-import org.apache.spark.sql.sources.{Aggregation, Filter}
+import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types._
 
 /** A Factory to fetch the correct type of

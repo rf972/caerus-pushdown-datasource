@@ -40,7 +40,6 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader}
 import org.apache.spark.sql.sources._
-import org.apache.spark.sql.sources.Aggregation
 import org.apache.spark.sql.types._
 import org.apache.spark.util.SerializableConfiguration
 
@@ -50,12 +49,11 @@ import org.apache.spark.util.SerializableConfiguration
  * @param options the options including "path"
  * @param filters the array of filters to push down
  * @param prunedSchema the new array of columns after pruning
- * @param pushedAggregation the array of aggregations to push down
  */
 class HdfsScan(schema: StructType,
+               pushdown: Pushdown,
                options: util.Map[String, String],
-               filters: Array[Filter], prunedSchema: StructType,
-               pushedAggregation: Aggregation)
+               filters: Array[Filter], prunedSchema: StructType)
       extends Scan with Batch {
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -72,9 +70,6 @@ class HdfsScan(schema: StructType,
   }
   init()
   override def toBatch: Batch = this
-
-  protected val pushdown = new Pushdown(schema, prunedSchema, filters,
-                                        pushedAggregation, options)
 
   private val maxPartSize: Long = (1024 * 1024 * 128)
   private var partitions: Array[InputPartition] = getPartitions()
@@ -200,7 +195,6 @@ class HdfsScan(schema: StructType,
  * @param options the options including "path"
  * @param filters the array of filters to push down
  * @param prunedSchema the new array of columns after pruning
- * @param pushedAggregation the array of aggregations to push down
  */
 class HdfsPartitionReaderFactory(pushdown: Pushdown,
                                  options: util.Map[String, String],
@@ -219,7 +213,7 @@ class HdfsPartitionReaderFactory(pushdown: Pushdown,
 
 /** PartitionReader of HdfsPartitions
  *
- * @param pushdown object handling filter, project and aggregate pushdown
+ * @param pushdown object handling filter, project, pushdown
  * @param options the options including "path"
  * @param partition the HdfsPartition to read from
  */
