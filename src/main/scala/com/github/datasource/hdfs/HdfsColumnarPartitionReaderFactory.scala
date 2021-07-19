@@ -104,7 +104,9 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
     val filePath = new Path(new URI(partition.name))
     lazy val footerFileMetaData =
       ParquetFileReader.readFooter(conf, filePath, SKIP_ROW_GROUPS).getFileMetaData
-    val pushed = if (enableParquetFilterPushDown) {
+    val pushed = if (!(options.get("path").contains("ndphdfs") &&
+                      pushdown.isPushdownNeeded) &&
+                     enableParquetFilterPushDown) {
       val parquetSchema = footerFileMetaData.getSchema
       // logger.info("parquet file schema: " + parquetSchema.toString)
       val parquetFilters = new ParquetFilters(parquetSchema, pushDownDate, pushDownTimestamp,
@@ -203,6 +205,9 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
     if (vectorizedReader.totalRowCount != 0) {
       vectorizedReader.enableReturningBatches()
       new HdfsColumnarPartitionReader(vectorizedReader)
+      // This alternate factory below is identical to the above, but
+      // provides more verbose progress tracking.
+      // new HdfsColumnarPartitionReaderProgress(vectorizedReader, batchSize, part)
     } else {
       /* If the row count is zero, it means that no result was
        * returned from ndp.  In this case, just use an
@@ -214,9 +219,6 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
                   part.name + " offset: " + part.offset)
       new HdfsEmptyColumnarPartitionReader(vectorizedReader)
     }
-    // This alternate factory below is identical to the above, but
-    // provides more verbose progress tracking.
-    // new HdfsColumnarPartitionReaderProgress(vectorizedReader, batchSize, part)
   }
 }
 
@@ -266,8 +268,8 @@ class HdfsColumnarPartitionReaderProgress(vectorizedReader: VectorizedParquetRec
   private val logger = LoggerFactory.getLogger(getClass)
   private var index: Long = 0
   override def next(): Boolean = {
-    logger.info(s"next batch partition: ${part.name} offset: ${part.offset} index: ${index}" +
-                s"rows: ${vectorizedReader.totalRowCount()}")
+    // logger.info(s"next batch partition: ${part.name} offset: ${part.offset} index: ${index}" +
+    //            s"rows: ${vectorizedReader.totalRowCount()}")
     vectorizedReader.nextKeyValue()
   }
    private val logSize = (500000 / batchSize) * batchSize

@@ -57,19 +57,26 @@ class HdfsNdpInputFile(store: HdfsStore, partition: HdfsPartition) extends Input
     var bytesRead = iStream.read(data, 0, data.length)
     HadoopStreams.wrap(new FSDataInputStream(new SeekableByteArrayInputStream(data)))
   } */
-  override def newStream(): SeekableInputStream = {
+  private val outBufStream = {
     val outBufStream = new ByteArrayOutputStream()
     val data = new Array[Byte](1024*1024)
     // val stream = fs.open(stat.getPath())
     val stream = store.open(partition)
     var bytesRead = stream.read(data, 0, data.length)
     length += bytesRead
-
+    // logger.info(s"bytesRead: ${bytesRead} length: ${length}")
     while (bytesRead != -1) {
       outBufStream.write(data, 0, bytesRead)
       bytesRead = stream.read(data, 0, data.length)
-      length += bytesRead
+      if (bytesRead != -1) {
+        length += bytesRead
+      }
+      // logger.info(s"bytesRead: ${bytesRead} length: ${length}")
     }
+    logger.info(s"file size: ${length}")
+    outBufStream
+  }
+  override def newStream(): SeekableInputStream = {
     HadoopStreams.wrap(new FSDataInputStream(
               new SeekableByteArrayInputStream(outBufStream.toByteArray())))
   }

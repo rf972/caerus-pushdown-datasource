@@ -147,7 +147,7 @@ class HdfsScan(schema: StructType,
       .builder()
       .getOrCreate()
   private val broadcastedHadoopConf = HdfsColumnarReaderFactory.getHadoopConf(sparkSession,
-                                                                              pushdown.prunedSchema)
+                                                                              pushdown.readSchema)
   private val sqlConf = sparkSession.sessionState.conf
   /** Returns an Array of S3Partitions for a given input file.
    *  the file is selected by options("path").
