@@ -204,7 +204,7 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
     val vectorizedReader = createVectorizedReader(part)
     if (vectorizedReader.totalRowCount != 0) {
       vectorizedReader.enableReturningBatches()
-      new HdfsColumnarPartitionReader(vectorizedReader)
+      new HdfsColumnarPartitionReader(vectorizedReader, batchSize, part)
       // This alternate factory below is identical to the above, but
       // provides more verbose progress tracking.
       // new HdfsColumnarPartitionReaderProgress(vectorizedReader, batchSize, part)
@@ -251,12 +251,29 @@ class HdfsEmptyColumnarPartitionReader(vectorizedReader: VectorizedParquetRecord
  * @param vectorizedReader - Already initialized vectorizedReader
  *                           which provides the data for the PartitionReader.
  */
-class HdfsColumnarPartitionReader(vectorizedReader: VectorizedParquetRecordReader)
+class HdfsColumnarPartitionReader(vectorizedReader: VectorizedParquetRecordReader,
+batchSize: Integer, part: HdfsPartition)
   extends PartitionReader[ColumnarBatch] {
+  private val logger = LoggerFactory.getLogger(getClass)
+  private var totalRows: Long = 0L
   override def next(): Boolean = {
+    // logger.info("ColumnarPartitionReader next()")
     vectorizedReader.nextKeyValue()
   }
   override def get(): ColumnarBatch = {
+    /* var cols = {
+      var cols = ""
+      for (i <- 0 to vectorizedReader.getColCount() - 1) {
+        if (vectorizedReader.getColType(i) != StringType) {
+          cols += s"${i}, ${vectorizedReader.getColType(i)} " +
+                  s"${vectorizedReader.getColAccessCount(i)} "
+        }
+      }
+      cols += s" TotalRows: ${totalRows}"
+      totalRows += batchSize
+      cols
+    }
+    logger.info("ColumnarPartitionReader get() accessCnt " + cols) */
     val batch = vectorizedReader.getCurrentValue.asInstanceOf[ColumnarBatch]
     batch
   }

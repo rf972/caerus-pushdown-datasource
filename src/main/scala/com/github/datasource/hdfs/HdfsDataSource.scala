@@ -122,6 +122,7 @@ class HdfsScan(schema: StructType,
         a += new HdfsPartition(index = 0, offset = parquetBlock.getStartingPos,
                                length = store.getLength(fName), // parquetBlock.getTotalByteSize,
                                name = fName,
+                               rows = parquetBlock.getRowCount,
                                store.getModifiedTime(fName))
       }
     } else {
@@ -130,17 +131,19 @@ class HdfsScan(schema: StructType,
         val reader = ParquetFileReader.open(HadoopInputFile.fromPath(new Path(fName),
                                                                      conf), readOptions)
         val parquetBlocks = reader.getFooter.getBlocks
+        HdfsStore.init(parquetBlocks.size)
         // Generate one partition per row Group.
         for (i <- 0 to parquetBlocks.size - 1) {
           val parquetBlock = parquetBlocks.get(i)
           a += new HdfsPartition(index = i, offset = parquetBlock.getStartingPos,
                                  length = parquetBlock.getCompressedSize,
                                  name = fName,
+                                 rows = parquetBlock.getRowCount,
                                  store.getModifiedTime(fName))
         }
       }
     }
-    logger.info(a.mkString(", "))
+    // logger.info(a.mkString(", "))
     a.toArray
   }
   private val sparkSession: SparkSession = SparkSession
@@ -187,7 +190,13 @@ class HdfsScan(schema: StructType,
          pushdown.isPushdownNeeded)) {
       new HdfsPartitionReaderFactory(pushdown, options,
                                      broadcastedHadoopConf)
-    } else {
+    } else if (options.get("path").contains("ndphdfs") &&
+               options.containsKey("outputFormat") &&
+               options.get("outputFormat").contains("binary") &&
+               pushdown.isPushdownNeeded) {
+        new HdfsBinColPartitionReaderFactory(pushdown, options,
+                                             broadcastedHadoopConf, sqlConf)
+      } else {
       new HdfsColumnarPartitionReaderFactory(pushdown, options,
                                              broadcastedHadoopConf, sqlConf)
     }
@@ -232,8 +241,8 @@ class HdfsPartitionReader(pushdown: Pushdown,
 
   private val logger = LoggerFactory.getLogger(getClass)
   val tc = TaskContext.get()
-  logger.info(s"Task id: ${tc.taskAttemptId()} Stage id: ${tc.stageId} " +
-              s"Partition: ${partition.index}:${partition.name}")
+  // logger.info(s"Task id: ${tc.taskAttemptId()} Stage id: ${tc.stageId} " +
+  //             s"Partition: ${partition.index}:${partition.name}")
   /* We setup a rowIterator and then read/parse
    * each row as it is asked for.
    */
@@ -247,18 +256,18 @@ class HdfsPartitionReader(pushdown: Pushdown,
     }
   }
 
-  var index = 0
+  // var index = 0
   def next: Boolean = {
     rowIterator.hasNext
   }
   def get: InternalRow = {
     val row = rowIterator.next
-    if (((index % 500000) == 0) ||
+    /* if (((index % 500000) == 0) ||
         (!next)) {
       logger.info(s"get: partition: ${partition.index} ${partition.offset}" +
                   s" ${partition.length} ${partition.name} index: ${index}")
     }
-    index = index + 1
+    index = index + 1 */
     row
   }
 

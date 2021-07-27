@@ -55,7 +55,7 @@ class ProcessorRequestParquet(accessTime: Long,
         val writer = new StringWriter
         XML.write(writer, root, "UTF-8", true, null)
         writer.flush()
-        logger.info(writer.toString.replace("\n", "").replace("  ", ""))
+        // logger.info(writer.toString.replace("\n", "").replace("  ", ""))
         writer.toString.replace("\n", "")
     }
 }

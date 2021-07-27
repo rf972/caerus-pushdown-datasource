@@ -32,6 +32,7 @@ class HdfsPartition(var index: Int,
                     var offset: Long = 0,
                     var length: Long = 0,
                     var name: String = "",
+                    var rows: Long = 0,
                     var modifiedTime: Long = 0)
   extends Partition with InputPartition with PushdownPartition {
 

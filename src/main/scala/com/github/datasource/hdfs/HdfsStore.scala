@@ -16,7 +16,10 @@
  */
 package com.github.datasource.hdfs
 
+import java.io.BufferedInputStream
 import java.io.BufferedReader
+import java.io.DataInputStream
+import java.io.FileInputStream
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.net.URI
@@ -28,7 +31,7 @@ import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
 
 import com.github.datasource.common.Pushdown
-import com.github.datasource.parse.{ParquetRowIterator, RowIteratorFactory}
+import com.github.datasource.parse.{BinaryRowIterator, ParquetRowIterator, RowIteratorFactory}
 import org.apache.commons.csv._
 import org.apache.commons.io.IOUtils
 import org.apache.commons.io.input.BoundedInputStream
@@ -196,6 +199,7 @@ class HdfsStore(pushdown: Pushdown,
         inStrm
     }
   }
+
   /** Returns a reader for a given Hdfs partition.
    *  Determines the correct start offset by looking backwards
    *  to find the end of the prior line.
@@ -211,10 +215,6 @@ class HdfsStore(pushdown: Pushdown,
     val filePath = new Path(partition.name)
     val (readParam, query) = getQueryParams(partition)
     logger.info(readParam)
-    /* When we are targeting ndphdfs, but we do not have a pushdown,
-     * we will not pass the processor element.
-     * This allows the NDP server to optimize further.
-     */
     if (isPushdownNeeded &&
         fileSystemType == "ndphdfs") {
         logger.info(s"SQL Query partition: ${partition.toString}")
@@ -380,6 +380,24 @@ class HdfsStore(pushdown: Pushdown,
                                    options.get("format"),
                                    skipHeader(partition))
   }
+  /** Returns an InputStream on an NDP server.
+   * @param partition the current partition
+   * @return InputStream for this partition, including pushdown.
+   */
+  def getStream(partition: HdfsPartition): InputStream = {
+    val filePath = new Path(partition.name)
+    val (readParam, query) = getQueryParams(partition)
+    logger.info(s"SQL Query partition: ${partition.toString}")
+    logger.info(s"SQL Query: ${query}")
+    val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
+    // logger.info("open fs rowGroup " + partition.index)
+    // HdfsStore.logStart(partition.index)
+    val inStrm = fs.open(filePath, 4096, readParam).asInstanceOf[FSDataInputStream]
+
+    // val INPUT_FILE = "/build/binary_out.bin";
+    // val inStrm = new FileInputStream(INPUT_FILE);
+    new DataInputStream(new BufferedInputStream(inStrm, 128*1024))
+  }
   /** Returns an Iterator over InternalRow for a given Hdfs partition.
    *  This is for the case where our NDP Server returns csv format
    *  for a parquet file.
@@ -388,6 +406,16 @@ class HdfsStore(pushdown: Pushdown,
    * @return a new CsvRowIterator for this partition.
    */
   def getRowIterParquet(partition: HdfsPartition): Iterator[InternalRow] = {
+    BinaryRowIterator(getStream(partition))
+  }
+  /** Returns an Iterator over InternalRow for a given Hdfs partition.
+   *  This is for the case where our NDP Server returns csv format
+   *  for a parquet file.
+   *
+   * @param partition the partition to read
+   * @return a new CsvRowIterator for this partition.
+   */
+  def getRowIterParquetOld(partition: HdfsPartition): Iterator[InternalRow] = {
     RowIteratorFactory.getIterator(getReader(partition, 0, 0),
                                    pushdown.readSchema,
                                    "csv",
@@ -400,6 +428,7 @@ class HdfsStore(pushdown: Pushdown,
  */
 object HdfsStore {
 
+  protected val logger = LoggerFactory.getLogger(getClass)
   private val sparkSession: SparkSession = SparkSession
       .builder()
       .getOrCreate()
@@ -555,5 +584,38 @@ object HdfsStore {
         statusArray.toSeq
       }
       fileStatusArray
+  }
+  var totalRowGroups: Int = 0
+  var start_time: Long = 0
+  var rowGroupStartTimes = new Array[Long](0)
+  var rowGroupEndTimes = new Array[Long](0)
+  def init(rowGroups: Int): Unit = {
+    if (totalRowGroups == 0) {
+      totalRowGroups = rowGroups
+      rowGroupStartTimes = new Array[Long](rowGroups)
+      rowGroupEndTimes = new Array[Long](rowGroups)
+    }
+  }
+  def resetLog(): Unit = { totalRowGroups = 0 }
+  def logStart(rowGroup: Int) : Unit = {
+    rowGroupStartTimes(rowGroup) = System.currentTimeMillis()
+  }
+  def logEnd(rowGroup: Int) : Unit = {
+    rowGroupEndTimes(rowGroup) = System.currentTimeMillis()
+  }
+  def showResults(): Unit = {
+    val sumTimes = {
+      var sum: Long = 0
+      for (i <- 0 until totalRowGroups) {
+        val delta: Long = (rowGroupEndTimes(i) - rowGroupStartTimes(i))
+        sum += delta
+      }
+      sum
+    }
+    if (totalRowGroups > 0) {
+      val average = sumTimes / totalRowGroups
+      logger.warn("Row Groups " + totalRowGroups)
+      logger.warn(f"Average time is ${average / 1000.0}%.3f sec")
+    }
   }
 }

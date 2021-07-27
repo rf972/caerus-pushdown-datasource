@@ -32,10 +32,11 @@ import org.apache.parquet.schema.Type;
 import org.apache.spark.memory.MemoryMode;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.execution.vectorized.ColumnVectorUtils;
-import org.apache.spark.sql.execution.vectorized.WritableColumnVector;
 import org.apache.spark.sql.execution.vectorized.OffHeapColumnVector;
 import org.apache.spark.sql.execution.vectorized.OnHeapColumnVector;
+import org.apache.spark.sql.execution.vectorized.WritableColumnVector;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
@@ -118,6 +119,15 @@ public class VectorizedParquetRecordReader extends
 
   private WritableColumnVector[] columnVectors;
 
+  public Long getColAccessCount(Integer i) {
+    return columnVectors[i].accessCount;
+  }
+  public Integer getColCount() {
+    return columnVectors.length;
+  }
+  public DataType getColType(Integer i) {
+    return columnVectors[i].dataType();
+  }
   /**
    * If true, this class returns batches instead of rows.
    */
