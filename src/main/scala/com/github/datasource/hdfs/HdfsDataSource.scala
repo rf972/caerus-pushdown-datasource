@@ -131,7 +131,7 @@ class HdfsScan(schema: StructType,
         val reader = ParquetFileReader.open(HadoopInputFile.fromPath(new Path(fName),
                                                                      conf), readOptions)
         val parquetBlocks = reader.getFooter.getBlocks
-        HdfsStore.init(parquetBlocks.size)
+
         // Generate one partition per row Group.
         for (i <- 0 to parquetBlocks.size - 1) {
           val parquetBlock = parquetBlocks.get(i)

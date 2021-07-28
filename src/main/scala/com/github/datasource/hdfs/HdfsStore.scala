@@ -585,37 +585,4 @@ object HdfsStore {
       }
       fileStatusArray
   }
-  var totalRowGroups: Int = 0
-  var start_time: Long = 0
-  var rowGroupStartTimes = new Array[Long](0)
-  var rowGroupEndTimes = new Array[Long](0)
-  def init(rowGroups: Int): Unit = {
-    if (totalRowGroups == 0) {
-      totalRowGroups = rowGroups
-      rowGroupStartTimes = new Array[Long](rowGroups)
-      rowGroupEndTimes = new Array[Long](rowGroups)
-    }
-  }
-  def resetLog(): Unit = { totalRowGroups = 0 }
-  def logStart(rowGroup: Int) : Unit = {
-    rowGroupStartTimes(rowGroup) = System.currentTimeMillis()
-  }
-  def logEnd(rowGroup: Int) : Unit = {
-    rowGroupEndTimes(rowGroup) = System.currentTimeMillis()
-  }
-  def showResults(): Unit = {
-    val sumTimes = {
-      var sum: Long = 0
-      for (i <- 0 until totalRowGroups) {
-        val delta: Long = (rowGroupEndTimes(i) - rowGroupStartTimes(i))
-        sum += delta
-      }
-      sum
-    }
-    if (totalRowGroups > 0) {
-      val average = sumTimes / totalRowGroups
-      logger.warn("Row Groups " + totalRowGroups)
-      logger.warn(f"Average time is ${average / 1000.0}%.3f sec")
-    }
-  }
 }

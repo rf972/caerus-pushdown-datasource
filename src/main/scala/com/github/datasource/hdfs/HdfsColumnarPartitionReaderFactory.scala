@@ -21,10 +21,8 @@ import java.time.ZoneId
 import java.util
 
 import scala.collection.JavaConverters._
-import scala.collection.mutable.{ArrayBuffer}
 
 import com.github.datasource.common.Pushdown
-import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapred.FileSplit
 import org.apache.hadoop.mapreduce._
@@ -33,7 +31,6 @@ import org.apache.parquet.filter2.predicate.{FilterApi, FilterPredicate}
 import org.apache.parquet.format.converter.ParquetMetadataConverter.SKIP_ROW_GROUPS
 import org.apache.parquet.hadoop.{ParquetFileReader, ParquetInputFormat}
 import org.apache.parquet.io.InputFile
-import org.dike.hdfs.NdpHdfsFileSystem
 import org.json4s._
 import org.json4s.jackson.JsonMethods._
 import org.slf4j.LoggerFactory
@@ -46,7 +43,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader}
-import org.apache.spark.sql.execution.datasources.{DataSourceUtils, PartitionedFile, RecordReaderIterator}
+import org.apache.spark.sql.execution.datasources.{DataSourceUtils, RecordReaderIterator}
 import org.apache.spark.sql.execution.datasources.parquet.{ParquetReadSupport, ParquetWriteSupport}
 import org.apache.spark.sql.execution.datasources.parquet.ParquetFilters
 import org.apache.spark.sql.execution.datasources.v2._
@@ -54,7 +51,6 @@ import org.apache.spark.sql.extension.parquet.VectorizedParquetRecordReader
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.internal.SQLConf.LegacyBehaviorPolicy
 import org.apache.spark.sql.sources._
-import org.apache.spark.sql.sources.Aggregation
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
@@ -255,30 +251,20 @@ class HdfsColumnarPartitionReader(vectorizedReader: VectorizedParquetRecordReade
 batchSize: Integer, part: HdfsPartition)
   extends PartitionReader[ColumnarBatch] {
   private val logger = LoggerFactory.getLogger(getClass)
-  private var totalRows: Long = 0L
-  override def next(): Boolean = {
-    // logger.info("ColumnarPartitionReader next()")
-    vectorizedReader.nextKeyValue()
-  }
+  override def next(): Boolean = vectorizedReader.nextKeyValue()
   override def get(): ColumnarBatch = {
-    /* var cols = {
-      var cols = ""
-      for (i <- 0 to vectorizedReader.getColCount() - 1) {
-        if (vectorizedReader.getColType(i) != StringType) {
-          cols += s"${i}, ${vectorizedReader.getColType(i)} " +
-                  s"${vectorizedReader.getColAccessCount(i)} "
-        }
-      }
-      cols += s" TotalRows: ${totalRows}"
-      totalRows += batchSize
-      cols
-    }
-    logger.info("ColumnarPartitionReader get() accessCnt " + cols) */
     val batch = vectorizedReader.getCurrentValue.asInstanceOf[ColumnarBatch]
     batch
   }
   override def close(): Unit = vectorizedReader.close()
 }
+/** PartitionReader which returns a ColumnarBatch, and
+ *  is relying on the Vectorized ParquetRecordReader to
+ *  fetch the batches.  And which provides a reasonable progress indicator.
+ *
+ * @param vectorizedReader - Already initialized vectorizedReader
+ *                           which provides the data for the PartitionReader.
+ */
 class HdfsColumnarPartitionReaderProgress(vectorizedReader: VectorizedParquetRecordReader,
                                           batchSize: Long, part: HdfsPartition)
   extends PartitionReader[ColumnarBatch] {

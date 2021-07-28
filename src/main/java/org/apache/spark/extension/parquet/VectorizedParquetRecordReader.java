@@ -119,9 +119,6 @@ public class VectorizedParquetRecordReader extends
 
   private WritableColumnVector[] columnVectors;
 
-  public Long getColAccessCount(Integer i) {
-    return columnVectors[i].accessCount;
-  }
   public Integer getColCount() {
     return columnVectors.length;
   }
