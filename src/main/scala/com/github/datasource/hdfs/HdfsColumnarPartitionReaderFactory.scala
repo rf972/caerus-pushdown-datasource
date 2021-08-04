@@ -46,6 +46,7 @@ import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader}
 import org.apache.spark.sql.execution.datasources.{DataSourceUtils, RecordReaderIterator}
 import org.apache.spark.sql.execution.datasources.parquet.{ParquetReadSupport, ParquetWriteSupport}
 import org.apache.spark.sql.execution.datasources.parquet.ParquetFilters
+import org.apache.spark.sql.execution.datasources.parquet.ParquetOptions
 import org.apache.spark.sql.execution.datasources.v2._
 import org.apache.spark.sql.extension.parquet.VectorizedParquetRecordReader
 import org.apache.spark.sql.internal.SQLConf
@@ -53,6 +54,7 @@ import org.apache.spark.sql.internal.SQLConf.LegacyBehaviorPolicy
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types._
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.SerializableConfiguration
 
@@ -69,6 +71,8 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
  sharedConf: Broadcast[org.apache.spark.util.SerializableConfiguration],
  sqlConf: SQLConf)
   extends PartitionReaderFactory {
+  private val parquetOptions = new ParquetOptions(options.asScala.toMap,
+                                                  sqlConf)
   private val logger = LoggerFactory.getLogger(getClass)
   private val isCaseSensitive = sqlConf.caseSensitiveAnalysis
   private val enableOffHeapColumnVector = sqlConf.offHeapColumnVectorEnabled
@@ -82,8 +86,8 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
   private val pushDownDecimal = sqlConf.parquetFilterPushDownDecimal
   private val pushDownStringStartWith = sqlConf.parquetFilterPushDownStringStartWith
   private val pushDownInFilterThreshold = sqlConf.parquetFilterPushDownInFilterThreshold
-  private val datetimeRebaseModeInRead = LegacyBehaviorPolicy.EXCEPTION.toString
-  private val int96RebaseModeInRead = LegacyBehaviorPolicy.EXCEPTION.toString
+  private val datetimeRebaseModeInRead = parquetOptions.datetimeRebaseModeInRead
+  private val int96RebaseModeInRead = parquetOptions.int96RebaseModeInRead
 
   private val sparkSession: SparkSession = SparkSession
       .builder()
@@ -100,13 +104,17 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
     val filePath = new Path(new URI(partition.name))
     lazy val footerFileMetaData =
       ParquetFileReader.readFooter(conf, filePath, SKIP_ROW_GROUPS).getFileMetaData
+    val datetimeRebaseMode = DataSourceUtils.datetimeRebaseMode(
+      footerFileMetaData.getKeyValueMetaData.get,
+      datetimeRebaseModeInRead)
     val pushed = if (!(options.get("path").contains("ndphdfs") &&
                       pushdown.isPushdownNeeded) &&
                      enableParquetFilterPushDown) {
       val parquetSchema = footerFileMetaData.getSchema
       // logger.info("parquet file schema: " + parquetSchema.toString)
       val parquetFilters = new ParquetFilters(parquetSchema, pushDownDate, pushDownTimestamp,
-        pushDownDecimal, pushDownStringStartWith, pushDownInFilterThreshold, isCaseSensitive)
+        pushDownDecimal, pushDownStringStartWith, pushDownInFilterThreshold, isCaseSensitive,
+        datetimeRebaseMode)
       pushdown.filters
         // Collects all converted Parquet filter predicates. Notice that not all predicates can be
         // converted (`ParquetFilters.createFilter` returns an `Option`). That's why a `flatMap`
@@ -136,9 +144,6 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
     if (pushed.isDefined) {
       ParquetInputFormat.setFilterPredicate(hadoopAttemptContext.getConfiguration, pushed.get)
     }
-    val datetimeRebaseMode = DataSourceUtils.datetimeRebaseMode(
-      footerFileMetaData.getKeyValueMetaData.get,
-      datetimeRebaseModeInRead)
     val int96RebaseMode = DataSourceUtils.int96RebaseMode(
       footerFileMetaData.getKeyValueMetaData.get,
       int96RebaseModeInRead)
