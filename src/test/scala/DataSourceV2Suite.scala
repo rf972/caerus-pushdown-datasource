@@ -75,8 +75,11 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
       .option("partitions", "1")
       .save("hdfs://dikehdfs:9000/unit-test-parquet")
   }
-  private val dataValues = Seq((0, 5, 1), (1, 10, 2), (2, 5, 1),
-                               (3, 10, 2), (4, 5, 1), (5, 10, 2), (6, 5, 1))
+  private val dataValuesInt = Seq((0, 5, 1), (1, 10, 2), (2, 5, 1),
+                                  (3, 10, 2), (4, 5, 1), (5, 10, 2), (6, 5, 1))
+  // Using long currently for NDP binary mode, which does not support int yet.
+  private val dataValues = Seq((0L, 5L, 1L), (1L, 10L, 2L), (2L, 5L, 1L),
+                               (3L, 10L, 2L), (4L, 5L, 1L), (5L, 10L, 2L), (6L, 5L, 1L))
   /** returns a dataframe object, which is to be used for testing of
    *  each test case in this suite.
    *  In this case, the data for the DataFrame does not contain a header.
@@ -152,10 +155,10 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
                   .agg(sum("j"), min("j"), max("j"), avg("j")),
                 Seq(Row(15, 5, 10, 7.5)))
     checkAnswer(df.filter("i > 4")
-                  .agg(sum("j"), min("j"), avg("j"), max("j")),
-                Seq(Row(15, 5, 7.5, 10)))
-    checkAnswer(df.agg(sum("i"), min("i"), max("i"), avg("i")),
-                Seq(Row(21, 0, 6, 3.0)))
+                  .agg(sum("j"), min("j"), max("j")),
+                Seq(Row(15, 5, 10)))
+    checkAnswer(df.agg(sum("i"), min("i"), max("i")),
+                Seq(Row(21, 0, 6)))
   }
   test("aggregate groupby") {
     checkAnswer(sql("SELECT sum(i) FROM integers GROUP BY j"),

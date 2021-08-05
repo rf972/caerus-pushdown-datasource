@@ -37,10 +37,10 @@ import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.scheduler._
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.connector.expressions._
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader}
 import org.apache.spark.sql.sources._
-import org.apache.spark.sql.sources.Aggregation
 import org.apache.spark.sql.types._
 import org.apache.spark.util.SerializableConfiguration
 
@@ -55,12 +55,11 @@ import org.apache.spark.util.SerializableConfiguration
 class HdfsScan(schema: StructType,
                options: util.Map[String, String],
                filters: Array[Filter], prunedSchema: StructType,
-               pushedAggregation: Aggregation)
+               pushedAggregation: Option[Aggregation])
       extends Scan with Batch {
 
   private val logger = LoggerFactory.getLogger(getClass)
   logger.trace("Created")
-  override def readSchema(): StructType = prunedSchema
 
   private def init(): Unit = {
     if (options.get("format") == "parquet") {
@@ -76,6 +75,7 @@ class HdfsScan(schema: StructType,
   protected val pushdown = new Pushdown(schema, prunedSchema, filters,
                                         pushedAggregation, options)
 
+  override def readSchema(): StructType = pushdown.readSchema
   private val maxPartSize: Long = (1024 * 1024 * 128)
   private var partitions: Array[InputPartition] = getPartitions()
 

@@ -63,11 +63,11 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, InterpretedOrdering}
 import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjection
+import org.apache.spark.sql.connector.expressions._
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.execution.datasources.RecordReaderIterator
 import org.apache.spark.sql.execution.datasources.parquet._
 import org.apache.spark.sql.internal.SQLConf.LegacyBehaviorPolicy
-import org.apache.spark.sql.sources.{Aggregation, Filter}
 import org.apache.spark.sql.types._
 
 /** A Factory to fetch the correct type of
@@ -217,7 +217,7 @@ class HdfsStore(pushdown: Pushdown,
     logger.info(readParam)
     if (isPushdownNeeded &&
         fileSystemType == "ndphdfs") {
-        logger.info(s"SQL Query partition: ${partition.toString}")
+        logger.info(s"SQL Query reader partition: ${partition.toString}")
         logger.info(s"SQL Query: ${query}")
         val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
         val inStrm = fs.open(filePath, 4096, readParam).asInstanceOf[FSDataInputStream]
@@ -387,7 +387,7 @@ class HdfsStore(pushdown: Pushdown,
   def getStream(partition: HdfsPartition): InputStream = {
     val filePath = new Path(partition.name)
     val (readParam, query) = getQueryParams(partition)
-    logger.info(s"SQL Query partition: ${partition.toString}")
+    logger.info(s"SQL Query stream partition: ${partition.toString}")
     logger.info(s"SQL Query: ${query}")
     val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
     // logger.info("open fs rowGroup " + partition.index)

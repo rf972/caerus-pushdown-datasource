@@ -27,6 +27,7 @@ import org.slf4j.LoggerFactory
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.connector.expressions._
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types._
@@ -42,16 +43,16 @@ import org.apache.spark.sql.types._
 class S3Scan(schema: StructType,
              options: util.Map[String, String],
              filters: Array[Filter], prunedSchema: StructType,
-             pushedAggregation: Aggregation)
+             pushedAggregation: Option[Aggregation])
       extends Scan with Batch {
 
   private val logger = LoggerFactory.getLogger(getClass)
-  override def readSchema(): StructType = prunedSchema
 
   override def toBatch: Batch = this
 
   protected val pushdown = new Pushdown(schema, prunedSchema, filters,
                                       pushedAggregation, options)
+  override def readSchema(): StructType = pushdown.readSchema
   private val spark = SparkSession.builder()
                                   .getOrCreate()
   private val maxPartBytes: Long = spark.sessionState.conf.filesMaxPartitionBytes

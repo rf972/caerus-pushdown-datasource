@@ -32,11 +32,10 @@ import org.slf4j.LoggerFactory
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.connector.catalog.{SessionConfigSupport, SupportsRead,
                                                Table, TableCapability, TableProvider}
-import org.apache.spark.sql.connector.expressions.Transform
+import org.apache.spark.sql.connector.expressions._
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils
 import org.apache.spark.sql.sources._
-import org.apache.spark.sql.sources.Aggregation
 import org.apache.spark.sql.sources.DataSourceRegister
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
@@ -126,7 +125,8 @@ class PushdownScanBuilder(schema: StructType,
   private val logger = LoggerFactory.getLogger(getClass)
   var pushedFilter: Array[Filter] = new Array[Filter](0)
   private var prunedSchema: StructType = schema
-  private var pushedAggregations = Aggregation(Seq.empty[AggregateFunc], Seq.empty[String])
+  private var pushedAggregations = Option.empty[Aggregation]
+
   /** Returns a scan object for this particular query.
    *   Currently we only support S3 and Hdfs.
    *
@@ -230,17 +230,20 @@ class PushdownScanBuilder(schema: StructType,
    * @param aggregation list of aggreates, assumption is that
    *                    these are "and" separated.
    */
-  override def pushAggregation(aggregation: Aggregation): Unit = {
+  override def pushAggregation(aggregation: Aggregation): Boolean = {
     val pushdown = new Pushdown(schema, prunedSchema, pushedFilter,
-                                aggregation, options)
+                                Some(aggregation), options)
     if (pushdownSupported() &&
         !options.containsKey("DisableAggregatePush")) {
       if (pushdown.aggregatePushdownValid()) {
-        pushedAggregations = aggregation
+        pushedAggregations = Some(aggregation)
+        true
       } else {
         logger.info(s"Aggregate not pushed down: " + aggregation)
+        false
       }
+    } else {
+      false
     }
   }
-  override def pushedAggregation(): Aggregation = pushedAggregations
 }
