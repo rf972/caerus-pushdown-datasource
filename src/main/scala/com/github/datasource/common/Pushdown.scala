@@ -13,10 +13,10 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * 
+ *
  * Note that portions of this code came from spark-select code:
  *  https://github.com/minio/spark-select/blob/master/src/main/scala/io/minio/spark/select/FilterPushdown.scala
- * 
+ *
  * Other portions of this code, most notably compileAggregates, and getColumnSchema,
  * came from this patch by Huaxin Gao:
  *   https://github.com/apache/spark/pull/29695
@@ -32,6 +32,7 @@ import scala.collection.mutable.ArrayBuilder
 
 import org.slf4j.LoggerFactory
 
+import org.apache.spark.sql.connector.expressions._
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types._
 
@@ -42,12 +43,24 @@ import org.apache.spark.sql.types._
  */
 class Pushdown(val schema: StructType, val prunedSchema: StructType,
                val filters: Seq[Filter],
-               val aggregation: Aggregation,
+               val aggregation: Option[Aggregation],
                val options: util.Map[String, String]) extends Serializable {
 
   protected val logger = LoggerFactory.getLogger(getClass)
 
   protected var supportsIsNull = !options.containsKey("DisableSupportsIsNull")
+
+  def isPushdownNeeded: Boolean = {
+    /* Determines if we should send the pushdown to ndp.
+     * If any of the pushdowns are in use (project, filter, aggregate),
+     * then we will consider that pushdown is needed.
+     */
+    ((prunedSchema.length != schema.length) ||
+     (filters.length > 0) ||
+     ( (aggregation != None) &&
+       ((aggregation.get.aggregateExpressions.length > 0) ||
+        (aggregation.get.groupByColumns.length > 0))))
+  }
   /**
    * Build a SQL WHERE clause for the given filters. If a filter cannot be pushed down then no
    * condition will be added to the WHERE clause. If none of the filters can be pushed down then
@@ -149,7 +162,7 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
    */
   def getColumnSchema(): (String, StructType) = {
 
-    val (compiledAgg, aggDataType) = compileAggregates(aggregation.aggregateExpressions)
+    val (compiledAgg, aggDataType) = compileAggregates(aggregation)
     val sb = new StringBuilder()
     val columnNames = prunedSchema.map(_.name).toArray
     var updatedSchema: StructType = new StructType()
@@ -170,54 +183,61 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
     col.contains("*") || col.contains("/") ||
     col.contains("(") || col.contains(")")
 
+  private def getStructFieldForCol(col: String): StructField =
+    schema.fields(schema.fieldNames.toList.indexOf(col))
   /** Returns an array of aggregates translated to strings.
    *
    * @param aggregates the array of aggregates to translate
    * @return array of strings
    */
-  def compileAggregates(aggregates: Seq[AggregateFunc]) : (Array[String], Array[DataType]) = {
+  def compileAggregates(agg: Option[Aggregation]) : (Array[String], Array[DataType]) = {
+    val aggregates: Seq[AggregateFunc] = {
+      if (agg == None) {
+        Seq.empty[AggregateFunc]
+      } else {
+        agg.get.aggregateExpressions
+      }
+    }
     def quote(colName: String): String = quoteIdentifier(colName)
     val aggBuilder = ArrayBuilder.make[String]
     val dataTypeBuilder = ArrayBuilder.make[DataType]
     aggregates.map {
-      case Min(column, dataType) =>
-        dataTypeBuilder += dataType
-        if (!containsArithmeticOp(column)) {
-          aggBuilder += s"MIN(${quote(column)})"
+      case min: Min =>
+        dataTypeBuilder += getStructFieldForCol(min.column.fieldNames.head).dataType
+        if (!containsArithmeticOp(min.column.fieldNames.head)) {
+          aggBuilder += s"MIN(${quote(min.column.fieldNames.head)})"
         } else {
-          aggBuilder += s"MIN(${quoteEachCols(column)})"
+          aggBuilder += s"MIN(${quoteEachCols(min.column.fieldNames.head)})"
         }
-      case Max(column, dataType) =>
-        dataTypeBuilder += dataType
-        if (!containsArithmeticOp(column)) {
-          aggBuilder += s"MAX(${quote(column)})"
+      case max: Max =>
+        val colName = max.column.fieldNames.head
+        dataTypeBuilder += getStructFieldForCol(colName).dataType
+        if (!containsArithmeticOp(colName)) {
+          aggBuilder += s"MAX(${quote(colName)})"
         } else {
-          aggBuilder += s"MAX(${quoteEachCols(column)})"
+          aggBuilder += s"MAX(${quoteEachCols(colName)})"
         }
-      case Sum(column, dataType, isDistinct) =>
-        val distinct = if (isDistinct) "DISTINCT " else ""
-        dataTypeBuilder += dataType
-        if (!containsArithmeticOp(column)) {
-          aggBuilder += s"SUM(${distinct} ${quote(column)})"
+      case sum: Sum =>
+        val colName = sum.column.fieldNames.head
+        val distinct = if (sum.isDistinct) "DISTINCT " else ""
+        dataTypeBuilder += getStructFieldForCol(colName).dataType
+        if (!containsArithmeticOp(colName)) {
+          aggBuilder += s"SUM(${distinct} ${quote(colName)})"
         } else {
-          aggBuilder += s"SUM(${distinct}${quoteEachCols(column)})"
+          aggBuilder += s"SUM(${distinct}${quoteEachCols(colName)})"
         }
-      case Avg(column, dataType, isDistinct) =>
-        val distinct = if (isDistinct) "DISTINCT " else ""
-        dataTypeBuilder += dataType
-        if (!containsArithmeticOp(column)) {
-          aggBuilder += s"AVG(${distinct} ${quote(column)})"
+      case count: Count =>
+        val colName = count.column.fieldNames.head
+        val distinct = if (count.isDistinct) "DISTINCT " else ""
+        dataTypeBuilder += getStructFieldForCol(colName).dataType
+        if (!containsArithmeticOp(colName)) {
+          aggBuilder += s"COUNT(${distinct}${quote(colName)})"
         } else {
-          aggBuilder += s"AVG(${distinct}${quoteEachCols(column)})"
+          aggBuilder += s"COUNT(${distinct}${quoteEachCols(colName)})"
         }
-      case Count(column, dataType, isDistinct) =>
-        val distinct = if (isDistinct) "DISTINCT " else ""
-        dataTypeBuilder += dataType
-        if (!containsArithmeticOp(column)) {
-          aggBuilder += s"COUNT(${distinct}${quote(column)})"
-        } else {
-          aggBuilder += s"COUNT(${distinct}${quoteEachCols(column)})"
-        }
+      case _: CountStar =>
+        dataTypeBuilder += LongType
+        aggBuilder += s"count(*)"
       case _ =>
     }
     (aggBuilder.result, dataTypeBuilder.result)
@@ -243,14 +263,16 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
     val newColsBuilder = ArrayBuilder.make[String]
     var updatedSchema: StructType = new StructType()
 
+    if (aggregation != None) {
+      for (groupBy <- aggregation.get.groupByColumns) {
+        val quotedGroupBy = quoteIdentifier(groupBy.fieldNames.head)
+        newColsBuilder += quotedGroupBy
+        updatedSchema = updatedSchema.add(colDataTypeMap.get(quotedGroupBy).get)
+      }
+    }
     for ((col, dataType) <- compiledAgg.zip(aggDataType)) {
       newColsBuilder += col
       updatedSchema = updatedSchema.add(col, dataType)
-    }
-    for (groupBy <- aggregation.groupByExpressions) {
-      val quotedGroupBy = quoteIdentifier(groupBy)
-      newColsBuilder += quotedGroupBy
-      updatedSchema = updatedSchema.add(colDataTypeMap.get(quotedGroupBy).get)
     }
     sb.append(", ").append(newColsBuilder.result.mkString(", "))
     updatedSchema
@@ -271,9 +293,11 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
   def quoteIdentifierGroupBy(colName: String): String = {
     s"${getColString(colName)}"
   }
-  private def getGroupByClause(aggregation: Aggregation): String = {
-    if (aggregation.groupByExpressions.length > 0) {
-      val quotedColumns = aggregation.groupByExpressions.map(quoteIdentifierGroupBy)
+  private def getGroupByClause(aggregation: Option[Aggregation]): String = {
+    if ((aggregation != None) &&
+        (aggregation.get.groupByColumns.length > 0)) {
+      val quotedColumns =
+          aggregation.get.groupByColumns.map(c => s"${getColString(c.fieldNames.head)}")
       s"GROUP BY ${quotedColumns.mkString(", ")}"
     } else {
       ""
@@ -383,9 +407,9 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
     var retVal = ""
     val groupByClause = getGroupByClause(aggregation)
     if (whereClause.length == 0) {
-      retVal = s"SELECT $columnList FROM $objectClause s $groupByClause"
+      retVal = s"SELECT $columnList FROM $objectClause $groupByClause"
     } else {
-      retVal = s"SELECT $columnList FROM $objectClause s $whereClause $groupByClause"
+      retVal = s"SELECT $columnList FROM $objectClause $whereClause $groupByClause"
     }
     retVal
   }
@@ -394,10 +418,26 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
    */
   def aggregatePushdownValid(): Boolean = {
     val (compiledAgg, aggDataType) =
-      compileAggregates(aggregation.aggregateExpressions)
-    (compiledAgg.isEmpty == false &&
-    (!options.containsKey("DisableGroupbyPush") ||
-      aggregation.groupByExpressions.length == 0))
+      compileAggregates(aggregation)
+    if (compiledAgg.isEmpty == false) {
+      var valid = true
+      /* Disable aggregate pushdown if it contains distinct,
+       * and if the DisableDistinct option is set.
+       */
+      if (options.containsKey("DisableDistinct")) {
+        for (agg <- compiledAgg) {
+          if (agg.contains("DISTINCT")) {
+            valid = false
+          }
+        }
+      }
+      ((!options.containsKey("DisableGroupbyPush") ||
+        ((aggregation != None) &&
+         (aggregation.get.groupByColumns.length == 0))) &&
+       valid)
+    } else {
+      true
+    }
   }
   val (readColumns: String,
        readSchema: StructType) = {

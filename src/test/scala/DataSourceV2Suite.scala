@@ -30,11 +30,6 @@ import org.apache.spark.sql.types._
  */
 abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   import testImplicits._
-  private val s3IpAddr = "dikehdfs"
-  override def sparkConf: SparkConf = super.sparkConf
-      .set("spark.datasource.pushdown.endpoint", s"http://$s3IpAddr:9858")
-      .set("spark.datasource.pushdown.accessKey", "admin")
-      .set("spark.datasource.pushdown.secretKey", "admin123")
 
   protected val schema = new StructType()
        .add("i", IntegerType, true)
@@ -57,23 +52,34 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
     val s = spark
     import s.implicits._
     val testDF = dataValues.toSeq.toDF("i", "j", "k")
+    /* Write a CSV file both with and without header.
+     */
     testDF.select("*").repartition(1)
       .write.mode("overwrite")
       .option("delimiter", ",")
       .format("csv")
       .option("header", "true")
       .option("partitions", "1")
-      .save("hdfs://dikehdfs:9000/integer-test")
+      .save("hdfs://dikehdfs:9000/unit-test-csv")
     testDF.select("*").repartition(1)
       .write.mode("overwrite")
       .option("delimiter", ",")
       .format("csv")
       .option("header", "false")
       .option("partitions", "1")
-      .save("hdfs://dikehdfs:9000/integer-test-noheader")
+      .save("hdfs://dikehdfs:9000/unit-test-csv-noheader")
+    /* Write Parquet file. */
+    testDF.select("*").repartition(1)
+      .write.mode("overwrite")
+      .format("parquet")
+      .option("partitions", "1")
+      .save("hdfs://dikehdfs:9000/unit-test-parquet")
   }
-  private val dataValues = Seq((0, 5, 1), (1, 10, 2), (2, 5, 1),
-                               (3, 10, 2), (4, 5, 1), (5, 10, 2), (6, 5, 1))
+  private val dataValuesInt = Seq((0, 5, 1), (1, 10, 2), (2, 5, 1),
+                                  (3, 10, 2), (4, 5, 1), (5, 10, 2), (6, 5, 1))
+  // Using long currently for NDP binary mode, which does not support int yet.
+  private val dataValues = Seq((0L, 5L, 1L), (1L, 10L, 2L), (2L, 5L, 1L),
+                               (3L, 10L, 2L), (4L, 5L, 1L), (5L, 10L, 2L), (6L, 5L, 1L))
   /** returns a dataframe object, which is to be used for testing of
    *  each test case in this suite.
    *  In this case, the data for the DataFrame does not contain a header.
@@ -87,6 +93,8 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   override def beforeAll(): Unit = {
     super.beforeAll()
     spark.sparkContext.setLogLevel("WARN")
+    // spark.sparkContext.setLogLevel("INFO")
+    // spark.sparkContext.setLogLevel("TRACE")
     initData()
     df.createOrReplaceTempView("integers")
     dfNoHeader.createOrReplaceTempView("integersNoHeader")
@@ -147,12 +155,12 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
                   .agg(sum("j"), min("j"), max("j"), avg("j")),
                 Seq(Row(15, 5, 10, 7.5)))
     checkAnswer(df.filter("i > 4")
-                  .agg(sum("j"), min("j"), avg("j"), max("j")),
-                Seq(Row(15, 5, 7.5, 10)))
-    checkAnswer(df.agg(sum("i"), min("i"), max("i"), avg("i")),
-                Seq(Row(21, 0, 6, 3.0)))
+                  .agg(sum("j"), min("j"), max("j")),
+                Seq(Row(15, 5, 10)))
+    checkAnswer(df.agg(sum("i"), min("i"), max("i")),
+                Seq(Row(21, 0, 6)))
   }
-  test("aggregate") {
+  test("aggregate groupby") {
     checkAnswer(sql("SELECT sum(i) FROM integers GROUP BY j"),
                 Seq(Row(12), Row(9)))
     checkAnswer(df.groupBy("j").agg(sum("i")),
@@ -173,8 +181,8 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
   test("aggregate distinct") {
     checkAnswer(sql("SELECT SUM(j) FROM integers WHERE i > 0"), Seq(Row(45)))
     checkAnswer(sql("SELECT SUM(DISTINCT j) FROM integers WHERE i > 0"), Seq(Row(15)))
-    checkAnswer(sql("SELECT AVG(j) FROM integers"),
-                Seq(Row(7.14285714285714)))
+    checkAnswer(sql("SELECT CAST(AVG(j) AS DECIMAL(5,2)) FROM integers"),
+                Seq(Row(7.14))) // 7.14285714285714
     checkAnswer(sql("SELECT AVG(DISTINCT j) FROM integers"),
                 Seq(Row(7.5)))
   }
@@ -201,7 +209,7 @@ abstract class DataSourceV2Suite extends QueryTest with SharedSparkSession {
                     " GROUP BY j"),
                 Seq(Row(18), Row(24)))
   }
-    test ("aggregate count") {
+  test ("aggregate count") {
     checkAnswer(sql("SELECT count(*) FROM integers"),
                 Seq(Row(7)))
     checkAnswer(sql("SELECT count(i) FROM integers"),

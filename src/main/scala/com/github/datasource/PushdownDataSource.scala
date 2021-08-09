@@ -22,16 +22,20 @@ import java.util.HashMap
 import scala.collection.JavaConverters._
 
 import com.github.datasource.common.Pushdown
-import com.github.datasource.hdfs.{HdfsScan, HdfsStore}
+import com.github.datasource.hdfs.{HdfsNdpInputFile, HdfsScan, HdfsStore}
 import com.github.datasource.s3.{S3Scan, S3Store}
+import org.apache.hadoop.fs.FileStatus
+import org.apache.hadoop.fs.FileSystem
+import org.apache.hadoop.fs.Path
 import org.slf4j.LoggerFactory
 
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.connector.catalog.{SessionConfigSupport, SupportsRead,
                                                Table, TableCapability, TableProvider}
-import org.apache.spark.sql.connector.expressions.Transform
+import org.apache.spark.sql.connector.expressions._
 import org.apache.spark.sql.connector.read._
+import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils
 import org.apache.spark.sql.sources._
-import org.apache.spark.sql.sources.Aggregation
 import org.apache.spark.sql.sources.DataSourceRegister
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
@@ -47,8 +51,23 @@ class DefaultSource extends TableProvider
   override def toString: String = s"PushdownDataSource()"
   override def supportsExternalMetadata(): Boolean = true
 
+  private val sparkSession: SparkSession = SparkSession
+      .builder()
+      .getOrCreate()
+
   override def inferSchema(options: CaseInsensitiveStringMap): StructType = {
-    throw new IllegalArgumentException("requires a user-supplied schema")
+    if (options.get("format") == "parquet") {
+      /* With parquet, we infer the schema from the metadata.
+       */
+      val path = options.get("path")
+      // logger.info(s"inferSchema path: ${path}")
+      val fileStatusArray = HdfsStore.getFileStatusList(path)
+      val schema = ParquetUtils.inferSchema(sparkSession, options.asScala.toMap, fileStatusArray)
+      schema.get
+    } else {
+      /* Other types like CSV require a user-supplied schema */
+      throw new IllegalArgumentException("requires a user-supplied schema")
+    }
   }
 
   override def getTable(schema: StructType,
@@ -106,7 +125,8 @@ class PushdownScanBuilder(schema: StructType,
   private val logger = LoggerFactory.getLogger(getClass)
   var pushedFilter: Array[Filter] = new Array[Filter](0)
   private var prunedSchema: StructType = schema
-  private var pushedAggregations = Aggregation(Seq.empty[AggregateFunc], Seq.empty[String])
+  private var pushedAggregations = Option.empty[Aggregation]
+
   /** Returns a scan object for this particular query.
    *   Currently we only support S3 and Hdfs.
    *
@@ -142,6 +162,20 @@ class PushdownScanBuilder(schema: StructType,
       HdfsStore.pushdownSupported(options)
     }
   }
+  /** returns true if filters can be fully pushed down
+   *
+   * @return true if pushdown supported, false otherwise
+   */
+  private def filterPushdownFullySupported(): Boolean = {
+    if (options.get("path").contains("s3a")) {
+      S3Store.pushdownSupported(options)
+    } else {
+      if (!options.get("path").contains("hdfs")) {
+        throw new Exception(s"path ${options.get("path")} is unexpected")
+      }
+      HdfsStore.filterPushdownFullySupported(options)
+    }
+  }
   /** Pushes down the list of columns specified by requiredSchema
    *
    * @param requiredSchema the list of coumns we should use, and prune others.
@@ -175,8 +209,14 @@ class PushdownScanBuilder(schema: StructType,
       logger.trace("compiled filter list: " + f.mkString(", "))
       if (!f.contains(None)) {
         pushedFilter = filters
-        // return empty array to indicate we pushed down all the filters.
-        Array[Filter]()
+        if (filterPushdownFullySupported()) {
+          // return empty array to indicate we pushed down all the filters.
+          Array[Filter]()
+        } else {
+          // In this case we know that we need to re-evaluate the filters
+          // since the pushdown cannot guarantee application of the filter.
+          filters
+        }
       } else {
         logger.info("Not pushing down filters.")
         // If we return all filters it will indicate they need to be re-evaluated.
@@ -187,20 +227,23 @@ class PushdownScanBuilder(schema: StructType,
   /** Will push down a list of aggregates to be saved and sent to
    *  the endpoint on all reads.
    *  Note that "DisableAggregatePush" option will prevent any pushes.
-   * @param aggregation list of aggreates, assupmtion is that
+   * @param aggregation list of aggreates, assumption is that
    *                    these are "and" separated.
    */
-  override def pushAggregation(aggregation: Aggregation): Unit = {
+  override def pushAggregation(aggregation: Aggregation): Boolean = {
     val pushdown = new Pushdown(schema, prunedSchema, pushedFilter,
-                                aggregation, options)
+                                Some(aggregation), options)
     if (pushdownSupported() &&
         !options.containsKey("DisableAggregatePush")) {
       if (pushdown.aggregatePushdownValid()) {
-        pushedAggregations = aggregation
+        pushedAggregations = Some(aggregation)
+        true
       } else {
         logger.info(s"Aggregate not pushed down: " + aggregation)
+        false
       }
+    } else {
+      false
     }
   }
-  override def pushedAggregation(): Aggregation = pushedAggregations
 }
