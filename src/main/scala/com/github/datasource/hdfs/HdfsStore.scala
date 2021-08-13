@@ -398,6 +398,37 @@ class HdfsStore(pushdown: Pushdown,
     // val inStrm = new FileInputStream(INPUT_FILE);
     new DataInputStream(new BufferedInputStream(inStrm, 128*1024))
   }
+  /** Returns an InputStream on an NDP server.
+   * @param partition the current partition
+   * @return InputStream for this partition, including pushdown.
+   */
+  def getOpStream(partition: HdfsPartition): InputStream = {
+    val filePath = new Path(partition.name)
+    val (readParam, query) = {
+      val columnList = pushdown.prunedSchema.fields.map(x => s"" + s"${x.name}")
+      val columns = pushdown.prunedSchema.fields.map(x => s"" +
+                    s"${x.name}").mkString(",")
+      val fileName = partition.name.replace("ndphdfs://dikehdfs:9860", "")
+      val requestQuery = s"SELECT ${columns} FROM s3Object"
+      options.get("format") match {
+        case "parquet" => (new ProcessorRequestLambda(partition.modifiedTime, partition.index,
+                           columnList, fileName).toXml, requestQuery)
+        case "parquetl" => (new ProcessorRequestParquet(partition.modifiedTime, partition.index,
+                                requestQuery, partition.length,
+                                headerType).toXml, requestQuery)
+      }
+    }
+    logger.info(s"SQL Query stream partition: ${partition.toString}")
+    logger.info(s"SQL Query: ${query}")
+    val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
+    // logger.info("open fs rowGroup " + partition.index)
+    // HdfsStore.logStart(partition.index)
+    val inStrm = fs.open(filePath, 4096, readParam).asInstanceOf[FSDataInputStream]
+
+    // val INPUT_FILE = "/build/binary_out.bin";
+    // val inStrm = new FileInputStream(INPUT_FILE);
+    new DataInputStream(new BufferedInputStream(inStrm, 128*1024))
+  }
   /** Returns an Iterator over InternalRow for a given Hdfs partition.
    *  This is for the case where our NDP Server returns csv format
    *  for a parquet file.

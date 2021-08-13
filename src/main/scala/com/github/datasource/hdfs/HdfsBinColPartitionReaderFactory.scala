@@ -81,9 +81,16 @@ class HdfsBinColPartitionReaderFactory(pushdown: Pushdown,
     val part = partition.asInstanceOf[HdfsPartition]
     var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options,
                                                      sparkSession, sharedConf.value.value)
-    val reader = new HdfsBinColVectReader(pushdown.readSchema, 4 * 1024,
+    val reader =
+    if (false) {
+      new HdfsBinColVectReader(pushdown.readSchema, 4 * 1024,
                                           part,
                                           store.getStream(part).asInstanceOf[DataInputStream])
+    } else {
+      new HdfsBinColVectReader(pushdown.prunedSchema, 4 * 1024,
+                              part,
+                              store.getOpStream(part).asInstanceOf[DataInputStream])
+    }
     logger.info("HdfsBinColVectReader created row group " + part.index)
     new HdfsBinColPartitionReader(reader, batchSize)
       // This alternate factory below is identical to the above, but

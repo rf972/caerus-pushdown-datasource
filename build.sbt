@@ -45,6 +45,8 @@ libraryDependencies ++= Seq(
   "org.slf4j" % "slf4j-simple" % "1.7.21" % Test,
   "org.apache.logging.log4j" % "log4j-api" % "2.14.0",
   "org.apache.logging.log4j" % "log4j-core" % "2.14.0",
+  "org.json" % "json" % "20210307",
+  "javax.json" % "javax.json-api" % "1.1.4",
 )
 lazy val compileScalastyle = taskKey[Unit]("compileScalastyle")
 
