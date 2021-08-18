@@ -51,12 +51,6 @@ class HdfsNdpInputFile(store: HdfsStore, partition: HdfsPartition) extends Input
   override def getLength(): Long = {
     length
   }
-  /* def newStreamDefault(): SeekableInputStream = {
-    val iStream = fs.open(stat.getPath())
-    val data = new Array[Byte](stat.getLen().asInstanceOf[Int])
-    var bytesRead = iStream.read(data, 0, data.length)
-    HadoopStreams.wrap(new FSDataInputStream(new SeekableByteArrayInputStream(data)))
-  } */
   private val outBufStream = {
     val outBufStream = new ByteArrayOutputStream()
     val data = new Array[Byte](1024*1024)

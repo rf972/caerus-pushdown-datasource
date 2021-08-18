@@ -36,6 +36,9 @@ import org.apache.spark.unsafe.types.UTF8String
  */
 object NdpDataType extends Enumeration {
   type NdpDataType = Value
+  /* val LongType = Value(1)
+  val DoubleType = Value(2)
+  val StringType = Value(3) */
   val LongType = Value(2)
   val DoubleType = Value(5)
   val StringType = Value(6)

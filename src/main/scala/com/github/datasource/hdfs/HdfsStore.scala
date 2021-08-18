@@ -410,10 +410,13 @@ class HdfsStore(pushdown: Pushdown,
                     s"${x.name}").mkString(",")
       val fileName = partition.name.replace("ndphdfs://dikehdfs:9860", "")
       val requestQuery = s"SELECT ${columns} FROM s3Object"
+      val compression = options.getOrDefault("compression", "None")
+      val test = options.getOrDefault("currenttest", "Unknown Test")
       options.get("format") match {
         case "parquet" => (new ProcessorRequestLambda(partition.modifiedTime, partition.index,
-                           columnList, fileName).toXml, requestQuery)
-        case "parquetl" => (new ProcessorRequestParquet(partition.modifiedTime, partition.index,
+                           columnList, fileName,
+                           compression, test).toXml, requestQuery)
+        case "parquetold" => (new ProcessorRequestParquet(partition.modifiedTime, partition.index,
                                 requestQuery, partition.length,
                                 headerType).toXml, requestQuery)
       }

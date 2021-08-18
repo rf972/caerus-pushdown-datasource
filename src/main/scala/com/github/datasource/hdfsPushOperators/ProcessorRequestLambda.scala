@@ -45,7 +45,9 @@ import org.apache.spark.sql.connector.read.InputPartition
 class ProcessorRequestLambda(accessTime: Long,
                              rowGroup: Long,
                              columnNames: Array[String],
-                             fileName: String) {
+                             fileName: String,
+                             compressionType: String = "None",
+                             test: String = "") {
 
     private val logger = LoggerFactory.getLogger(getClass)
 
@@ -72,7 +74,7 @@ class ProcessorRequestLambda(accessTime: Long,
         inputNodeBuilder.add("File", fileName)
 
         val projectionNodeBuilder = Json.createObjectBuilder()
-        projectionNodeBuilder.add("Name", "TpchQ1")
+        projectionNodeBuilder.add("Name", test)
         projectionNodeBuilder.add("Type", "_PROJECTION")
         val projectionArrayBuilder = Json.createArrayBuilder()
 
@@ -85,6 +87,7 @@ class ProcessorRequestLambda(accessTime: Long,
         val optputNodeBuilder = Json.createObjectBuilder()
         optputNodeBuilder.add("Name", "OutputNode")
         optputNodeBuilder.add("Type", "_OUTPUT")
+        optputNodeBuilder.add("CompressionType", compressionType);
 
         val nodeArrayBuilder = Json.createArrayBuilder()
         nodeArrayBuilder.add(inputNodeBuilder.build())

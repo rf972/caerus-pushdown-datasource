@@ -205,6 +205,8 @@ class HdfsColumnarPartitionReaderFactory(pushdown: Pushdown,
     val vectorizedReader = createVectorizedReader(part)
     if (vectorizedReader.totalRowCount != 0) {
       vectorizedReader.enableReturningBatches()
+      logger.info("Using parquet-mr columnar partition reader " +
+                  part.name + " offset: " + part.offset)
       new HdfsColumnarPartitionReader(vectorizedReader, batchSize, part)
       // This alternate factory below is identical to the above, but
       // provides more verbose progress tracking.

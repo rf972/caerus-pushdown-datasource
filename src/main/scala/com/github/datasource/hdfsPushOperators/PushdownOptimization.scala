@@ -169,7 +169,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
       attrSeq
     })
     if (failed) {
-      EitherLeft("Failed")
+      EitherLeft("Failed getting filter expr attributes")
     } else {
       EitherRight(attributes)
     }
@@ -188,22 +188,11 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
       case GreaterThan(attr, value) => getFilterExpressionAttributes(attr)
       case LessThanOrEqual(attr, value) => getFilterExpressionAttributes(attr)
       case GreaterThanOrEqual(attr, value) => getFilterExpressionAttributes(attr)
-      // When support is not there, do not push down IS NULL.
-      // Allow the pushdown to continue without IS NULL,
-      // to help evaluate pushdown.  For production consider to reject
-      // the pushdown completely.
       case IsNull(attr) => getFilterExpressionAttributes(attr)
-      // When support is not there, do not push down IS NULL.
-      // Allow the pushdown to continue without IS NULL,
-      // to help evaluate pushdown.  For production consider to reject
-      // the pushdown completely.
       case IsNotNull(attr) => getFilterExpressionAttributes(attr)
-      /* case StringStartsWith(attr, value) =>
-        getFilterExpressionAttributes(attr)
-      case StringEndsWith(attr, value) =>
-        getFilterExpressionAttributes(attr)
-      case StringContains(attr, value) =>
-       getFilterExpressionAttributes(attr) */
+      case StartsWith(left, right) => getFilterExpressionAttributes(left)
+      case EndsWith(left, right) => getFilterExpressionAttributes(left)
+      case Contains(left, right) => getFilterExpressionAttributes(left)
       case other@_ => logger.info("unknown filter:" + other) ; Seq[AttributeReference]()
     }
   }
@@ -217,6 +206,21 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
   def canHandlePlan(project: Seq[NamedExpression],
                     filters: Seq[Expression],
                     child: DataSourceV2ScanRelation): Boolean = {
+    /* val relationArgs = child match {
+      case DataSourceV2ScanRelation(relation, scan, output) =>
+      (relation, scan, output)
+    }
+    val scanArgs = relationArgs._2 match {
+      case ParquetScan(_, _, _, dataSchema, readSchema, _, _, opts, _, _) =>
+        (dataSchema, readSchema, opts)
+      /* case HdfsOpScan(schema, schema, opts, _) =>
+        (schema, opts) */
+    }
+    if (scanArgs._1 == scanArgs._2) {
+      logger.info("Plan not modified. No Project Necessary. " +
+                  (scanArgs._3).get("currenttest"))
+      return false
+    } */
     val attrReferencesEither = getAttributeReferences(project)
     if (attrReferencesEither.isLeft) {
       logger.info("Plan not modified due to project")
@@ -250,6 +254,52 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
       case _ => None
     }
   }
+  private def transformProject(project: Seq[NamedExpression],
+                               filters: Seq[Expression],
+                               child: DataSourceV2ScanRelation): LogicalPlan = {
+    val relationArgs = child match {
+      case DataSourceV2ScanRelation(relation, scan, output) =>
+      (relation, scan, output)
+    }
+    val attrReferencesEither = getAttributeReferences(project)
+
+    val attrReferences = attrReferencesEither match {
+      case EitherRight(r) => r
+      case EitherLeft(l) => Seq[AttributeReference]()
+    }
+    val scanArgs = relationArgs._2 match {
+      case ParquetScan(_, _, _, dataSchema, _, _, _, opts, _, _) =>
+        (dataSchema, opts)
+      case HdfsOpScan(schema, _, opts, _) =>
+        (schema, opts)
+    }
+    val filterReferencesEither = getFilterAttributes(filters)
+    val filterReferences = filterReferencesEither match {
+      case EitherRight(r) => r
+      case EitherLeft(l) => Seq[AttributeReference]()
+    }
+    val allReferences = (attrReferences ++ filterReferences).distinct
+    val opt = new HashMap[String, String](scanArgs._2)
+    val path = opt.get("path").replace("hdfs://dikehdfs:9000/", "ndphdfs://dikehdfs/")
+    val ndpRel = getNdpRelation(path)
+    opt.put("path", path)
+    opt.put("format", "parquet")
+    opt.put("outputFormat", "binary")
+    opt.put("compression", "lz4")
+    val hdfsScanObject = new HdfsOpScan(scanArgs._1, allReferences.toStructType, opt,
+                                        needsRule = false )
+    val scanRelation = DataSourceV2ScanRelation(ndpRel.get,
+                                                hdfsScanObject, allReferences)
+    val filterCondition = filters.reduceLeftOption(And)
+    // scanRelation = DataSourceV2ScanRelation(relationArgs._1, relationArgs._2,
+    //                                        allReferences)
+    val withFilter = filterCondition.map(LogicalFilter(_, scanRelation)).getOrElse(scanRelation)
+    if (withFilter.output != project || filters.length == 0) {
+      Project(project, withFilter)
+    } else {
+      withFilter
+    }
+  }
   private def modifyLogicalPlan(plan: LogicalPlan): LogicalPlan = {
     val newPlan = plan.transform {
       case s@ScanOperation(project,
@@ -257,51 +307,15 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
                            child: DataSourceV2ScanRelation) if (needsRule(child) &&
                            canHandlePlan(project, filters, child)) =>
         ruleCount += 1
-        logger.info("ruleCount is: %d".format(ruleCount))
-        // val jsonParams = createJsonOp(project)
-        // logger.info("json is: " + jsonParams)
-        val relationArgs = child match {
-          case DataSourceV2ScanRelation(relation, scan, output) =>
-          (relation, scan, output)
-        }
-        val attrReferencesEither = getAttributeReferences(project)
-
-        val attrReferences = attrReferencesEither match {
-          case EitherRight(r) => r
-          case EitherLeft(l) => Seq[AttributeReference]()
-        }
-        val scanArgs = relationArgs._2 match {
-          case ParquetScan(_, _, _, dataSchema, _, _, _, opts, _, _) =>
-            (dataSchema, opts)
-          case HdfsOpScan(schema, _, opts, _) =>
-            (schema, opts)
-        }
-        val filterReferencesEither = getFilterAttributes(filters)
-        val filterReferences = filterReferencesEither match {
-          case EitherRight(r) => r
-          case EitherLeft(l) => Seq[AttributeReference]()
-        }
-        val allReferences = (attrReferences ++ filterReferences).distinct
-        val opt = new HashMap[String, String](scanArgs._2)
-        val path = opt.get("path").replace("hdfs://dikehdfs:9000/", "ndphdfs://dikehdfs/")
-        val ndpRel = getNdpRelation(path)
-        opt.put("path", path)
-        opt.put("format", "parquet")
-        opt.put("outputFormat", "binary")
-        val hdfsScanObject = new HdfsOpScan(scanArgs._1, allReferences.toStructType, opt,
-                                            needsRule = false )
-        val scanRelation = DataSourceV2ScanRelation(ndpRel.get,
-                                                    hdfsScanObject, allReferences)
-        val filterCondition = filters.reduceLeftOption(And)
-        val withFilter = filterCondition.map(LogicalFilter(_, scanRelation)).getOrElse(scanRelation)
-        val modified = if (withFilter.output != project || filters.length == 0) {
-          Project(project, withFilter)
-        } else {
-          withFilter
-        }
+        logger.info("rules processed: %d".format(ruleCount))
+        val modified = transformProject(project, filters, child)
         logger.info("before scan: \n" + project + "\n" + s)
         logger.info("after scan: \n" + modified)
         modified
+    }
+    if (newPlan != plan) {
+      logger.info("before: \n" + plan)
+      logger.info("after: \n" + newPlan)
     }
     newPlan
   }

@@ -181,13 +181,13 @@ case class HdfsOpScan(schema: StructType,
     logger.info("Create Reader Factory " + {if (options.containsKey("JsonParams")) { "Json" }
     else { "original" } })
 
-    if (pushdown.schema.length == pushdown.prunedSchema.length) {
+    /* if (pushdown.schema.length == pushdown.prunedSchema.length) {
       new HdfsColumnarPartitionReaderFactory(pushdown, options,
                                              broadcastedHadoopConf, sqlConf)
-    } else {
+    } else { */
       new HdfsBinColPartitionReaderFactory(pushdown, options,
-                                           broadcastedHadoopConf, sqlConf)
-    }
+                                           broadcastedHadoopConf, sqlConf, true)
+    // }
   }
 }
 

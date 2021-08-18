@@ -195,7 +195,8 @@ class HdfsScan(schema: StructType,
                options.get("outputFormat").contains("binary") &&
                pushdown.isPushdownNeeded) {
         new HdfsBinColPartitionReaderFactory(pushdown, options,
-                                             broadcastedHadoopConf, sqlConf)
+                                             broadcastedHadoopConf, sqlConf,
+                                             false)
       } else {
       new HdfsColumnarPartitionReaderFactory(pushdown, options,
                                              broadcastedHadoopConf, sqlConf)
