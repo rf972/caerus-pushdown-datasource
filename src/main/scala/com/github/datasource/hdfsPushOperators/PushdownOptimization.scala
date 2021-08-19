@@ -206,7 +206,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
   def canHandlePlan(project: Seq[NamedExpression],
                     filters: Seq[Expression],
                     child: DataSourceV2ScanRelation): Boolean = {
-    /* val relationArgs = child match {
+    val relationArgs = child match {
       case DataSourceV2ScanRelation(relation, scan, output) =>
       (relation, scan, output)
     }
@@ -220,7 +220,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
       logger.info("Plan not modified. No Project Necessary. " +
                   (scanArgs._3).get("currenttest"))
       return false
-    } */
+    }
     val attrReferencesEither = getAttributeReferences(project)
     if (attrReferencesEither.isLeft) {
       logger.info("Plan not modified due to project")
@@ -285,7 +285,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     opt.put("path", path)
     opt.put("format", "parquet")
     opt.put("outputFormat", "binary")
-    opt.put("compression", "lz4")
+    // opt.put("compression", "lz4")
     val hdfsScanObject = new HdfsOpScan(scanArgs._1, allReferences.toStructType, opt,
                                         needsRule = false )
     val scanRelation = DataSourceV2ScanRelation(ndpRel.get,

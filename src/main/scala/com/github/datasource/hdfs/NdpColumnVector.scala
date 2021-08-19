@@ -38,10 +38,20 @@ object NdpDataType extends Enumeration {
   type NdpDataType = Value
   /* val LongType = Value(1)
   val DoubleType = Value(2)
-  val StringType = Value(3) */
+  val ByteArrayType = Value(3) */
+  val UnknownType = Value(0)
   val LongType = Value(2)
   val DoubleType = Value(5)
-  val StringType = Value(6)
+  val ByteArrayType = Value(6)
+  val FixedLenByteArrayType = Value(7)
+}
+/** This encodes the offset of
+ */
+object NdpHeaderOffset {
+  val DataType = (0 * 4)
+  val TypeSize = (1 * 4)
+  val DataLen = (2 * 4)
+  val CompressedLen = (3 * 4)
 }
 
 /** Represents a ColumnVector which can understand
@@ -55,16 +65,16 @@ class NdpColumnVector(batchSize: Integer, dataType: Int, schema: StructType)
     extends ColumnVector(schema: StructType) {
   private val logger = LoggerFactory.getLogger(getClass)
 
-  val (byteBuffer: ByteBuffer,
-       stringIndex: Array[Int],
-       stringLen: ByteBuffer,
-       bufferLength: Integer) = {
+  private val (byteBuffer: ByteBuffer,
+               stringIndex: Array[Int],
+               stringLen: ByteBuffer,
+               bufferLength: Integer) = {
     var stringIndex = Array[Int](0)
     var stringLen = ByteBuffer.allocate(0)
     val bytes: Int = NdpDataType(dataType) match {
       case NdpDataType.LongType => 8
       case NdpDataType.DoubleType => 8
-      case NdpDataType.StringType =>
+      case NdpDataType.ByteArrayType =>
       // Assumes single byte length field.
       stringIndex = new Array[Int](batchSize)
       stringLen = ByteBuffer.allocate(batchSize)
@@ -75,6 +85,8 @@ class NdpColumnVector(batchSize: Integer, dataType: Int, schema: StructType)
      stringIndex, stringLen,
      (batchSize * bytes).asInstanceOf[Integer])
   }
+  private val header = ByteBuffer.allocate(4 * 4)
+  private var fixedTextLen: Int = 0
   def close(): Unit = {}
   def getArray(row: Int): org.apache.spark.sql.vectorized.ColumnarArray = { null }
   def getBinary(row: Int): Array[Byte] = { null }
@@ -89,9 +101,20 @@ class NdpColumnVector(batchSize: Integer, dataType: Int, schema: StructType)
   def getMap(row: Int): org.apache.spark.sql.vectorized.ColumnarMap = { null }
   def getShort(row: Int): Short = { byteBuffer.getShort(row * 2) }
   def getUTF8String(row: Int): org.apache.spark.unsafe.types.UTF8String = {
-    val offset = stringIndex(row)
-    val length = stringLen.get(row)
-    UTF8String.fromBytes(byteBuffer.array(), offset, length)
+    NdpDataType(dataType) match {
+       case NdpDataType.LongType => UTF8String.fromString(
+                                          byteBuffer.getLong(row * 8).toString)
+      case NdpDataType.DoubleType => UTF8String.fromString(
+                                          byteBuffer.getDouble(row * 8).toString)
+      case NdpDataType.ByteArrayType =>
+        if (fixedTextLen > 0) {
+          UTF8String.fromBytes(byteBuffer.array(), fixedTextLen * row, fixedTextLen)
+        } else {
+          val offset = stringIndex(row)
+          val length = stringLen.get(row)
+          UTF8String.fromBytes(byteBuffer.array(), offset, length)
+        }
+    }
   }
   def hasNull(): Boolean = { false }
   def isNullAt(row: Int): Boolean = { false }
@@ -110,23 +133,37 @@ class NdpColumnVector(batchSize: Integer, dataType: Int, schema: StructType)
     var rows: Int = 0
     try {
       var bytesRead = 0
-      val numBytes = stream.readLong()
-      rows = numBytes.toInt / 8
-      NdpDataType(dataType) match {
+      stream.readFully(header.array(), 0, header.capacity())
+
+      val numBytes = header.getInt(NdpHeaderOffset.DataLen)
+
+      NdpDataType(header.getInt(NdpHeaderOffset.DataType)) match {
         case NdpDataType.LongType =>
+          rows = numBytes.toInt / 8
+          fixedTextLen = 0
           if (rows > batchSize) {
-            logger.warn(s"rows ${rows} > batchSize ${batchSize}")
+            throw new Exception(s"rows ${rows} > batchSize ${batchSize}")
           }
           stream.readFully(byteBuffer.array(), 0, rows * 8)
         case NdpDataType.DoubleType =>
+          rows = numBytes.toInt / 8
+          fixedTextLen = 0
           if (rows > batchSize) {
-            logger.warn(s"rows ${rows} > batchSize ${batchSize}")
+            throw new Exception(s"rows ${rows} > batchSize ${batchSize}")
           }
           stream.readFully(byteBuffer.array(), 0, rows * 8)
-        case NdpDataType.StringType =>
+        case NdpDataType.FixedLenByteArrayType =>
+          fixedTextLen = header.getInt(NdpHeaderOffset.TypeSize)
+          rows = numBytes.toInt / fixedTextLen
+          if (numBytes.toInt > bufferLength) {
+            throw new Exception(s"numBytes ${numBytes.toInt} > bufferLength ${bufferLength}")
+          }
+          stream.readFully(byteBuffer.array(), 0, numBytes.toInt)
+        case NdpDataType.ByteArrayType =>
+          fixedTextLen = 0
           rows = numBytes.toInt
           if (rows > batchSize) {
-            logger.warn(s"rows ${rows} > batchSize ${batchSize}")
+            throw new Exception(s"rows ${rows} > batchSize ${batchSize}")
           }
           stream.readFully(stringLen.array(), 0, rows)
           var idx = 0
@@ -134,9 +171,10 @@ class NdpColumnVector(batchSize: Integer, dataType: Int, schema: StructType)
             stringIndex(i) = idx
             idx += stringLen.get(i) & 0xFF
           }
-          val textBytes = stream.readLong()
+          stream.readFully(header.array(), 0, header.capacity())
+          val textBytes = header.getInt(NdpHeaderOffset.DataLen)
           if (textBytes > bufferLength) {
-            logger.warn(s"textBytes ${textBytes} > bufferLength ${bufferLength}")
+            throw new Exception(s"textBytes ${textBytes} > bufferLength ${bufferLength}")
           }
           stream.readFully(byteBuffer.array(), 0, textBytes.toInt)
       }
