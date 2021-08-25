@@ -404,32 +404,34 @@ class HdfsStore(pushdown: Pushdown,
    */
   def getOpStream(partition: HdfsPartition): InputStream = {
     val filePath = new Path(partition.name)
-    val (readParam, query) = {
-      val columnList = pushdown.prunedSchema.fields.map(x => s"" + s"${x.name}")
-      val columns = pushdown.prunedSchema.fields.map(x => s"" +
-                    s"${x.name}").mkString(",")
-      val fileName = partition.name.replace("ndphdfs://dikehdfs:9860", "")
-      val requestQuery = s"SELECT ${columns} FROM s3Object"
-      val compression = options.getOrDefault("compression", "None")
-      val test = options.getOrDefault("currenttest", "Unknown Test")
+    logger.info(s"SQL Query stream partition: ${partition.toString}")
+    val readParam = {
       options.get("format") match {
-        case "parquet" => (new ProcessorRequestLambda(partition.modifiedTime, partition.index,
-                           columnList, fileName,
-                           compression, test).toXml, requestQuery)
-        case "parquetold" => (new ProcessorRequestParquet(partition.modifiedTime, partition.index,
-                                requestQuery, partition.length,
-                                headerType).toXml, requestQuery)
+        case "parquet" =>
+          val columnList = pushdown.prunedSchema.fields.map(x => s"" + s"${x.name}")
+          val fileName = partition.name.replace("ndphdfs://dikehdfs:9860", "")
+          val compression = options.getOrDefault("ndpcompression", "None")
+          val compLevel = options.getOrDefault("ndpcomplevel", "-100")
+          val test = options.getOrDefault("currenttest", "Unknown Test")
+          val lambdaXml = new ProcessorRequestLambda(partition.modifiedTime, partition.index,
+                                                    columnList, fileName,
+                                                    compression, compLevel, test).toXml
+          logger.info(lambdaXml.replace("\n", "").replace("  ", ""))
+          lambdaXml
+        case "parquetold" =>
+          val columns = pushdown.prunedSchema.fields.map(x => s"" +
+                        s"${x.name}").mkString(",")
+          val requestQuery = s"SELECT ${columns} FROM s3Object"
+          logger.info(s"SQL Query: ${requestQuery}")
+          new ProcessorRequestParquet(partition.modifiedTime, partition.index,
+                                       requestQuery, partition.length,
+                                       headerType).toXml
       }
     }
-    logger.info(s"SQL Query stream partition: ${partition.toString}")
-    logger.info(s"SQL Query: ${query}")
     val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
     // logger.info("open fs rowGroup " + partition.index)
     // HdfsStore.logStart(partition.index)
     val inStrm = fs.open(filePath, 4096, readParam).asInstanceOf[FSDataInputStream]
-
-    // val INPUT_FILE = "/build/binary_out.bin";
-    // val inStrm = new FileInputStream(INPUT_FILE);
     new DataInputStream(new BufferedInputStream(inStrm, 128*1024))
   }
   /** Returns an Iterator over InternalRow for a given Hdfs partition.

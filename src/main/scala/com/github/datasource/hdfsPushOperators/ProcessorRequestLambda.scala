@@ -47,6 +47,7 @@ class ProcessorRequestLambda(accessTime: Long,
                              columnNames: Array[String],
                              fileName: String,
                              compressionType: String = "None",
+                             compressionLevel: String = "-100",
                              test: String = "") {
 
     private val logger = LoggerFactory.getLogger(getClass)
@@ -88,6 +89,7 @@ class ProcessorRequestLambda(accessTime: Long,
         optputNodeBuilder.add("Name", "OutputNode")
         optputNodeBuilder.add("Type", "_OUTPUT")
         optputNodeBuilder.add("CompressionType", compressionType);
+        optputNodeBuilder.add("CompressionLevel", compressionLevel);
 
         val nodeArrayBuilder = Json.createArrayBuilder()
         nodeArrayBuilder.add(inputNodeBuilder.build())
@@ -121,7 +123,7 @@ class ProcessorRequestLambda(accessTime: Long,
         xmlw.close()
 
         val xmlStr = strw.toString()
-        logger.info(xmlStr.replace("\n", "").replace("  ", ""))
+        // logger.info(xmlStr.replace("\n", "").replace("  ", ""))
         xmlStr.replace("\n", "")
     }
 }

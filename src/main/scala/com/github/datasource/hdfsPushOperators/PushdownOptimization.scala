@@ -21,6 +21,7 @@ import java.util.HashMap
 
 import scala.util.{Either, Left => EitherLeft, Right => EitherRight}
 
+import com.github.datasource.common.PushdownJson
 import org.json._
 import org.slf4j.LoggerFactory
 
@@ -270,7 +271,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     val scanArgs = relationArgs._2 match {
       case ParquetScan(_, _, _, dataSchema, _, _, _, opts, _, _) =>
         (dataSchema, opts)
-      case HdfsOpScan(schema, _, opts, _) =>
+      case HdfsOpScan(schema, _, opts, _, _) =>
         (schema, opts)
     }
     val filterReferencesEither = getFilterAttributes(filters)
@@ -282,17 +283,29 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     val opt = new HashMap[String, String](scanArgs._2)
     val path = opt.get("path").replace("hdfs://dikehdfs:9000/", "ndphdfs://dikehdfs/")
     val ndpRel = getNdpRelation(path)
+    val compression = opt.getOrDefault("ndpcompression", "None")
+    val compLevel = opt.getOrDefault("ndpcomplevel", "-100")
     opt.put("path", path)
     opt.put("format", "parquet")
     opt.put("outputFormat", "binary")
-    // opt.put("compression", "lz4")
-    val hdfsScanObject = new HdfsOpScan(scanArgs._1, allReferences.toStructType, opt,
+    logger.info("Using compression: " + compression + " Level: " + compLevel)
+    val filtersJson = {
+      if (PushdownJson.validateFilters(filters)) {
+        val filtersJson = PushdownJson.getFiltersJson(filters)
+        // logger.warn("Pushdown " + opt.getOrDefault("currenttest", "") +
+        //            " Filter Json " + filtersJson)
+        filtersJson
+      } else {
+        logger.warn("No Pushdown " + filters.toString)
+        ""
+      }
+    }
+    val hdfsScanObject = new HdfsOpScan(scanArgs._1, allReferences.toStructType,
+                                        opt, filtersJson,
                                         needsRule = false )
     val scanRelation = DataSourceV2ScanRelation(ndpRel.get,
                                                 hdfsScanObject, allReferences)
     val filterCondition = filters.reduceLeftOption(And)
-    // scanRelation = DataSourceV2ScanRelation(relationArgs._1, relationArgs._2,
-    //                                        allReferences)
     val withFilter = filterCondition.map(LogicalFilter(_, scanRelation)).getOrElse(scanRelation)
     if (withFilter.output != project || filters.length == 0) {
       Project(project, withFilter)

@@ -56,6 +56,7 @@ import org.apache.spark.util.SerializableConfiguration
 case class HdfsOpScan(schema: StructType,
                       inputReadSchema: StructType,
                       options: util.Map[String, String],
+                      filtersJson: String,
                       val needsRule: Boolean = true)
       extends Scan with Batch {
 
@@ -138,6 +139,7 @@ case class HdfsOpScan(schema: StructType,
 
         // Generate one partition per row Group.
         for (i <- 0 to parquetBlocks.size - 1) {
+        // for (i <- 0 until 0) {
           val parquetBlock = parquetBlocks.get(i)
           // logger.info(s"Create partition: ${fName} receivedPushdown: ${receivedPushdown}")
           a += new HdfsPartition(index = i, offset = parquetBlock.getStartingPos,
@@ -148,7 +150,7 @@ case class HdfsOpScan(schema: StructType,
         }
       }
     }
-    logger.info("Partitions: " + a.mkString(", "))
+    // logger.info("Partitions: " + a.mkString(", "))
     a.toArray
   }
   private val sparkSession: SparkSession = SparkSession

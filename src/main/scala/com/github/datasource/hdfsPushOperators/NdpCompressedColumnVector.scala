@@ -25,6 +25,8 @@ import java.util
 
 import scala.collection.JavaConverters._
 
+// ZSTD support
+import com.github.luben.zstd.Zstd
 // LZ4 support
 import net.jpountz.lz4.LZ4Exception
 import net.jpountz.lz4.LZ4Factory
@@ -67,8 +69,8 @@ object NdpCompHeaderOffset {
 class NdpCompressedColumnVector(batchSize: Integer, dataType: Int, schema: StructType, id: String)
     extends ColumnVector(schema: StructType) {
   private val logger = LoggerFactory.getLogger(getClass)
-  private val factory = LZ4Factory.fastestInstance()
-  private val decompressor = factory.fastDecompressor()
+  // private val factory = LZ4Factory.fastestInstance()
+  // private val decompressor = factory.fastDecompressor()
   // val decompressor = factory.safeDecompressor()
   val (byteBuffer: ByteBuffer,
        bufferLength: Integer,
@@ -148,16 +150,19 @@ class NdpCompressedColumnVector(batchSize: Integer, dataType: Int, schema: Struc
       // val tId = Thread.currentThread().getId()
       NdpCompressedDataType(header.getInt(NdpCompHeaderOffset.DataType)) match {
         case NdpCompressedDataType.LongType =>
-          if (numBytes.toInt > compressedBufLen) {
+          /* if (numBytes.toInt > compressedBufLen) {
             throw new Exception(s"numBytes (${numBytes.toInt}) > " +
                                 s"compressedBufLen (${compressedBufLen}")
-          }
+          } */
           // logger.info(s"${tId}:${id}) read ${numBytes.toInt} bytes (Long)")
-          stream.readFully(compressedBuffer.array(), 0, numBytes.toInt)
+          val cb = new Array[Byte](numBytes.toInt)
+          stream.readFully(cb, 0, numBytes.toInt)
+          // stream.readFully(compressedBuffer.array(), 0, numBytes.toInt)
           // logger.info(s"${tId}:${id}) decompressing (Double)")
           val dataBytes = header.getInt(NdpCompHeaderOffset.DataLen)
-          decompressor.decompress(compressedBuffer.array(), 0,
-                                  byteBuffer.array(), 0, dataBytes.toInt)
+          Zstd.decompress(byteBuffer.array(), cb)
+          // decompressor.decompress(compressedBuffer.array(), 0,
+          //                         byteBuffer.array(), 0, dataBytes.toInt)
           rows = dataBytes.toInt / 8
           fixedTextLen = 0
           // logger.info(s"${tId}:${tId}:${id}) decompressed ${numBytes.toInt} bytes " +
@@ -166,16 +171,19 @@ class NdpCompressedColumnVector(batchSize: Integer, dataType: Int, schema: Struc
             throw new Exception(s"rows ${rows} > batchSize ${batchSize}")
           }
         case NdpCompressedDataType.DoubleType =>
-          if (numBytes.toInt > compressedBufLen) {
+          /* if (numBytes.toInt > compressedBufLen) {
             throw new Exception(s"numBytes (${numBytes.toInt}) > " +
                                 s"compressedBufLen (${compressedBufLen}")
-          }
+          } */
           // logger.info(s"${tId}:${id}) read ${numBytes.toInt} bytes (Double)")
-          stream.readFully(compressedBuffer.array(), 0, numBytes.toInt)
+          val cb = new Array[Byte](numBytes.toInt)
+          stream.readFully(cb, 0, numBytes.toInt)
+          // stream.readFully(compressedBuffer.array(), 0, numBytes.toInt)
           // logger.info(s"${tId}:${id}) decompressing (Double)")
           val dataBytes = header.getInt(NdpCompHeaderOffset.DataLen)
-          decompressor.decompress(compressedBuffer.array(), 0,
-                                  byteBuffer.array(), 0, dataBytes.toInt)
+          Zstd.decompress(byteBuffer.array(), cb)
+          // decompressor.decompress(compressedBuffer.array(), 0,
+          //                         byteBuffer.array(), 0, dataBytes.toInt)
           rows = dataBytes.toInt / 8
           fixedTextLen = 0
           // logger.info(s"${tId}:${id}) decompressed ${numBytes.toInt} " +
@@ -185,30 +193,36 @@ class NdpCompressedColumnVector(batchSize: Integer, dataType: Int, schema: Struc
           }
         case NdpCompressedDataType.FixedLenByteArrayType =>
           fixedTextLen = header.getInt(NdpCompHeaderOffset.TypeSize)
-          if (numBytes.toInt > compressedBufLen) {
+          /* if (numBytes.toInt > compressedBufLen) {
             throw new Exception(s"numBytes (${numBytes.toInt}) > " +
                                 s"compressedBufLen (${compressedBufLen}")
-          }
-          stream.readFully(compressedBuffer.array(), 0, numBytes.toInt)
+          } */
+          val cb = new Array[Byte](numBytes.toInt)
+          stream.readFully(cb, 0, numBytes.toInt)
+          // stream.readFully(compressedBuffer.array(), 0, numBytes.toInt)
           val dataBytes = header.getInt(NdpCompHeaderOffset.DataLen)
           if (dataBytes.toInt > bufferLength) {
             throw new Exception(s"dataBytes ${dataBytes.toInt} > bufferLength ${bufferLength}")
           }
-          decompressor.decompress(compressedBuffer.array(), 0,
-                                  byteBuffer.array(), 0, dataBytes)
+          Zstd.decompress(byteBuffer.array(), cb)
+          // decompressor.decompress(compressedBuffer.array(), 0,
+          //                         byteBuffer.array(), 0, dataBytes)
           rows = dataBytes.toInt / fixedTextLen
         case NdpCompressedDataType.ByteArrayType =>
-          if (numBytes.toInt > compressedBufLen) {
+          /* if (numBytes.toInt > compressedBufLen) {
             throw new Exception(s"numBytes (${numBytes.toInt}) > " +
                                 s"compressedBufLen (${compressedBufLen}")
-          }
+          } */
           // Read and decompress string index.
-          stream.readFully(compressedBuffer.array(), 0, numBytes.toInt)
+          var cb = new Array[Byte](numBytes.toInt)
+          stream.readFully(cb, 0, numBytes.toInt)
+          // stream.readFully(compressedBuffer.array(), 0, numBytes.toInt)
           // logger.info(s"${tId}:${id},${tId}) read ${numBytes.toInt} bytes (String Index)")
           // logger.info(s"${tId}:${id}) decompressing (String Index)")
           val indexBytes = header.getInt(NdpCompHeaderOffset.DataLen)
-          decompressor.decompress(compressedBuffer.array(), 0,
-                                  stringLen.array(), 0, indexBytes)
+          Zstd.decompress(stringLen.array(), cb)
+          // decompressor.decompress(compressedBuffer.array(), 0,
+          //                        stringLen.array(), 0, indexBytes)
           rows = indexBytes
           fixedTextLen = 0
           // logger.info(s"${tId}:${id}) decompressed ${numBytes.toInt} -> " +
@@ -223,16 +237,19 @@ class NdpCompressedColumnVector(batchSize: Integer, dataType: Int, schema: Struc
           }
           stream.readFully(header.array(), 0, header.capacity())
           val textBytes = header.getInt(NdpCompHeaderOffset.CompressedLen)
-          if (textBytes.toInt > compressedBufLen) {
+          /* if (textBytes.toInt > compressedBufLen) {
             throw new Exception(s"numBytes (${textBytes.toInt}) > " +
                                 s"compressedBufLen (${compressedBufLen}")
-          }
-          stream.readFully(compressedBuffer.array(), 0, textBytes.toInt)
+          } */
+          cb = new Array[Byte](textBytes.toInt)
+          stream.readFully(cb, 0, textBytes.toInt)
+          // stream.readFully(compressedBuffer.array(), 0, textBytes.toInt)
           // logger.info(s"${tId}:${id}) read ${textBytes.toInt} bytes (String)")
           // logger.info(s"${tId}:${id}) decompressing (String)")
           val dataBytes = header.getInt(NdpCompHeaderOffset.DataLen)
-          decompressor.decompress(compressedBuffer.array(), 0,
-                                  byteBuffer.array(), 0, dataBytes)
+          Zstd.decompress(byteBuffer.array(), cb)
+          // decompressor.decompress(compressedBuffer.array(), 0,
+          //                        byteBuffer.array(), 0, dataBytes)
           // logger.info(s"${tId}:${id}) decompressed ${dataBytes.toInt} bytes " +
           //             s"-> ${dataBytes} (String)")
           if (dataBytes > bufferLength) {

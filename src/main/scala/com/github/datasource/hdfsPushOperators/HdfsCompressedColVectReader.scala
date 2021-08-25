@@ -84,10 +84,10 @@ class HdfsCompressedColVectReader(schema: StructType,
         /* We do not expect to hit end of file, but if we do, it might mean that
          * the NDP query had nothing to return.
          */
-          logger.info("Init Exception: " + ex)
+          throw new Exception("Init Exception: " + ex)
           (0, new Array[Int](0))
         case ex: Throwable =>
-          logger.info("Init Throwable: " + ex)
+          throw new Exception("Init Throwable: " + ex)
           (0, new Array[Int](0))
     }
   }

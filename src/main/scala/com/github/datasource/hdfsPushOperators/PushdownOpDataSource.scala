@@ -149,6 +149,6 @@ class PushdownOpScanBuilder(schema: StructType,
     if (!options.get("path").contains("hdfs")) {
       throw new Exception(s"endpoint ${options.get("endpoint")} is unexpected")
     }
-    new HdfsOpScan(schema, schema, opt)
+    new HdfsOpScan(schema, schema, opt, "")
   }
 }

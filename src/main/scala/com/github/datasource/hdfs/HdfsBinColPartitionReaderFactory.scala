@@ -88,9 +88,9 @@ class HdfsBinColPartitionReaderFactory(pushdown: Pushdown,
                                           part,
                                           store.getStream(part).asInstanceOf[DataInputStream])
     } else {
-      if (options.containsKey("compression") &&
-          (options.get("compression") == "lz4")) {
-        new HdfsCompressedColVectReader(pushdown.prunedSchema, 4 * 1024,
+      if (options.containsKey("ndpcompression") &&
+          (options.get("ndpcompression") == "ZSTD")) {
+        new HdfsCompressedColVectReader(pushdown.prunedSchema, 8 * 1024,
                                         part,
                                         store.getOpStream(part).asInstanceOf[DataInputStream])
       } else {
