@@ -44,7 +44,8 @@ import org.apache.spark.sql.types._
 class Pushdown(val schema: StructType, val prunedSchema: StructType,
                val filters: Seq[Filter],
                val aggregation: Option[Aggregation],
-               val options: util.Map[String, String]) extends Serializable {
+               val options: util.Map[String, String],
+               val jsonFilter: String = "") extends Serializable {
 
   protected val logger = LoggerFactory.getLogger(getClass)
 

@@ -56,7 +56,6 @@ import org.apache.spark.util.SerializableConfiguration
 case class HdfsOpScan(schema: StructType,
                       inputReadSchema: StructType,
                       options: util.Map[String, String],
-                      filtersJson: String,
                       val needsRule: Boolean = true)
       extends Scan with Batch {
 

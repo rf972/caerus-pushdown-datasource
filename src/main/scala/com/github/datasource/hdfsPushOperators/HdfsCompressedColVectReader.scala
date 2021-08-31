@@ -107,7 +107,7 @@ class HdfsCompressedColVectReader(schema: StructType,
         rows = currentRows
       } else if (rows != 0 && currentRows != rows) {
         // We expect all rows in the batch to be the same size.
-        throw new Exception("mismatch in rows ${currentRows} != ${rows}")
+        throw new Exception(s"mismatch in rows ${currentRows} != ${rows}")
       }
     }
     rows

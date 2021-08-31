@@ -413,9 +413,11 @@ class HdfsStore(pushdown: Pushdown,
           val compression = options.getOrDefault("ndpcompression", "None")
           val compLevel = options.getOrDefault("ndpcomplevel", "-100")
           val test = options.getOrDefault("currenttest", "Unknown Test")
+          val filters = options.getOrDefault("ndpjsonfilters", "")
           val lambdaXml = new ProcessorRequestLambda(partition.modifiedTime, partition.index,
                                                     columnList, fileName,
-                                                    compression, compLevel, test).toXml
+                                                    compression, compLevel,
+                                                    filters, test).toXml
           logger.info(lambdaXml.replace("\n", "").replace("  ", ""))
           lambdaXml
         case "parquetold" =>

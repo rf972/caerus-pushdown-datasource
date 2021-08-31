@@ -29,12 +29,15 @@ import javax.xml.stream._
 
 import scala.xml._
 
+import PushdownJsonStatus._
 import org.json._
 import org.slf4j.LoggerFactory
 
 import org.apache.spark.sql.catalyst.expressions._
 
 object PushdownJson {
+
+  private val filterMaxDepth = 2
 
   protected val logger = LoggerFactory.getLogger(getClass)
 
@@ -127,64 +130,83 @@ object PushdownJson {
          buildUnknown(other)
     }
   }
-  def getFiltersJson(filters: Seq[Expression]): String = {
-    val filterBuilder = Json.createObjectBuilder()
-    filterBuilder.add("Name", "Filters")
+  def getFiltersJson(filters: Seq[Expression], test: String): String = {
+    val filterNodeBuilder = Json.createObjectBuilder()
+    filterNodeBuilder.add("Name", test)
+    filterNodeBuilder.add("Type", "_FILTER")
     val filterArrayBuilder = Json.createArrayBuilder()
     for (f <- filters) {
+      if (validateFilterExpression(f)) {
         val j = buildFiltersJson(f)
         filterArrayBuilder.add(j)
+      }
     }
-    filterBuilder.add("FilterArray", filterArrayBuilder.build())
+    filterNodeBuilder.add("FilterArray", filterArrayBuilder)
 
     val stringWriter = new StringWriter()
     val writer = Json.createWriter(stringWriter)
-    writer.writeObject(filterBuilder.build())
+    writer.writeObject(filterNodeBuilder.build())
     writer.close()
     val jsonString = stringWriter.getBuffer().toString()
     val indented = (new JSONObject(jsonString)).toString(4)
     indented
   }
-  def validateFilterExpression(expr: Expression): Boolean = {
+  def validateFilterExpression(expr: Expression, depth: Int = 0): Boolean = {
+    if (depth > filterMaxDepth) {
+      /* Reached depth unsupported by NDP server. */
+      return false
+    }
+    /* Traverse the tree and validate the nodes are supported. */
     expr match {
-      case Or(left, right) => validateFilterExpression(left) &&
-                              validateFilterExpression(right)
-      case And(left, right) => validateFilterExpression(left) &&
-                              validateFilterExpression(right)
-      case Not(filter) => validateFilterExpression(filter)
-      case EqualTo(left, right) => validateFilterExpression(left) &&
-                                   validateFilterExpression(right)
-      case LessThan(left, right) => validateFilterExpression(left) &&
-                                     validateFilterExpression(right)
-      case GreaterThan(left, right) => validateFilterExpression(left) &&
-                                       validateFilterExpression(right)
-      case LessThanOrEqual(left, right) => validateFilterExpression(left) &&
-                                           validateFilterExpression(right)
-      case GreaterThanOrEqual(left, right) => validateFilterExpression(left) &&
-                                              validateFilterExpression(right)
-      case IsNull(attr) => validateFilterExpression(attr)
-      case IsNotNull(attr) => validateFilterExpression(attr)
-      case StartsWith(left, right) => validateFilterExpression(left) &&
-                                    validateFilterExpression(right)
-      case EndsWith(left, right) => validateFilterExpression(left) &&
-                                    validateFilterExpression(right)
-      case Contains(left, right) => validateFilterExpression(left) &&
-                                    validateFilterExpression(right)
+      /* case Or(left, right) => validateFilterExpression(left, depth + 1) &&
+                              validateFilterExpression(right, depth + 1)
+      case And(left, right) => validateFilterExpression(left, depth + 1) &&
+                              validateFilterExpression(right, depth + 1)
+      case Not(filter) => validateFilterExpression(filter, depth + 1) */
+      case EqualTo(left, right) => validateFilterExpression(left, depth + 1) &&
+                                   right.isInstanceOf[Literal]
+      case LessThan(left, right) => validateFilterExpression(left, depth + 1) &&
+                                     right.isInstanceOf[Literal]
+      case GreaterThan(left, right) => validateFilterExpression(left, depth + 1) &&
+                                       right.isInstanceOf[Literal]
+      case LessThanOrEqual(left, right) => validateFilterExpression(left, depth + 1) &&
+                                           right.isInstanceOf[Literal]
+      case GreaterThanOrEqual(left, right) => validateFilterExpression(left, depth + 1) &&
+                                              right.isInstanceOf[Literal]
+      case IsNull(attr) => validateFilterExpression(attr, depth + 1)
+      case IsNotNull(attr) => validateFilterExpression(attr, depth + 1)
+      /* case StartsWith(left, right) => validateFilterExpression(left, depth + 1) &&
+                                    validateFilterExpression(right, depth + 1)
+      case EndsWith(left, right) => validateFilterExpression(left, depth + 1) &&
+                                    validateFilterExpression(right, depth + 1)
+      case Contains(left, right) => validateFilterExpression(left, depth + 1) &&
+                                    validateFilterExpression(right, depth + 1) */
       case attrib @ AttributeReference(name, dataType, nullable, meta) =>
         true
       case Literal(value, dataType) =>
         true
       case other@_ => logger.warn("unknown filter:" + other)
+        /* Reached an unknown node, return validation failed. */
         false
     }
   }
-  def validateFilters(filters: Seq[Expression]): Boolean = {
+  def validateFilters(filters: Seq[Expression]): PushdownJsonStatus = {
     var status: Boolean = true
+    var invalidCount = 0
+    var validCount = 0
     for (f <- filters) {
-      if (!validateFilterExpression(f)) {
-        status = false
+      if (validateFilterExpression(f)) {
+        validCount += 1
+      } else {
+        invalidCount += 1
       }
     }
-    status
+    if (invalidCount == 0 && validCount > 0) {
+      PushdownJsonStatus.FullyValid
+    } else if (invalidCount > 0 && validCount > 0) {
+      PushdownJsonStatus.PartiallyValid
+    } else {
+      PushdownJsonStatus.Invalid
+    }
   }
 }

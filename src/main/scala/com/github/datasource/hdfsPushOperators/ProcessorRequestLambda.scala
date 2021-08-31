@@ -16,6 +16,7 @@
  */
 package com.github.datasource.hdfs
 
+import java.io.StringReader
 import java.io.StringWriter
 import java.util.Iterator
 import javax.json.Json
@@ -48,6 +49,7 @@ class ProcessorRequestLambda(accessTime: Long,
                              fileName: String,
                              compressionType: String = "None",
                              compressionLevel: String = "-100",
+                             filters: String = "",
                              test: String = "") {
 
     private val logger = LoggerFactory.getLogger(getClass)
@@ -85,17 +87,22 @@ class ProcessorRequestLambda(accessTime: Long,
 
         projectionNodeBuilder.add("ProjectionArray", projectionArrayBuilder)
 
-        val optputNodeBuilder = Json.createObjectBuilder()
-        optputNodeBuilder.add("Name", "OutputNode")
-        optputNodeBuilder.add("Type", "_OUTPUT")
-        optputNodeBuilder.add("CompressionType", compressionType);
-        optputNodeBuilder.add("CompressionLevel", compressionLevel);
+        val outputNodeBuilder = Json.createObjectBuilder()
+        outputNodeBuilder.add("Name", "OutputNode")
+        outputNodeBuilder.add("Type", "_OUTPUT")
+        outputNodeBuilder.add("CompressionType", compressionType);
+        outputNodeBuilder.add("CompressionLevel", compressionLevel);
 
         val nodeArrayBuilder = Json.createArrayBuilder()
         nodeArrayBuilder.add(inputNodeBuilder.build())
-        nodeArrayBuilder.add(projectionNodeBuilder.build())
-        nodeArrayBuilder.add(optputNodeBuilder.build())
 
+        if (filters != "") {
+          val filterJsonObject = Json.createReader(new StringReader(filters)).readObject()
+          nodeArrayBuilder.add(filterJsonObject)
+        }
+
+        nodeArrayBuilder.add(projectionNodeBuilder.build())
+        nodeArrayBuilder.add(outputNodeBuilder.build())
         dagBuilder.add("NodeArray", nodeArrayBuilder)
 
         // For now we will assume simple pipe with ordered connections

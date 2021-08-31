@@ -16,19 +16,23 @@
  */
 package com.github.datasource.hdfs
 
+import java.io.FileWriter
 import java.util
 import java.util.HashMap
 
+import scala.collection.mutable
 import scala.util.{Either, Left => EitherLeft, Right => EitherRight}
 
-import com.github.datasource.common.PushdownJson
+import com.github.datasource.common.{PushdownJson, PushdownJsonStatus}
 import org.json._
 import org.slf4j.LoggerFactory
 
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.planning.ScanOperation
 import org.apache.spark.sql.catalyst.plans.logical.{Filter => LogicalFilter}
+import org.apache.spark.sql.catalyst.plans.logical.Aggregate
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.plans.logical.Project
 import org.apache.spark.sql.catalyst.rules.Rule
@@ -271,7 +275,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     val scanArgs = relationArgs._2 match {
       case ParquetScan(_, _, _, dataSchema, _, _, _, opts, _, _) =>
         (dataSchema, opts)
-      case HdfsOpScan(schema, _, opts, _, _) =>
+      case HdfsOpScan(schema, _, opts, _) =>
         (schema, opts)
     }
     val filterReferencesEither = getFilterAttributes(filters)
@@ -279,41 +283,67 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
       case EitherRight(r) => r
       case EitherLeft(l) => Seq[AttributeReference]()
     }
-    val allReferences = (attrReferences ++ filterReferences).distinct
     val opt = new HashMap[String, String](scanArgs._2)
     val path = opt.get("path").replace("hdfs://dikehdfs:9000/", "ndphdfs://dikehdfs/")
     val ndpRel = getNdpRelation(path)
     val compression = opt.getOrDefault("ndpcompression", "None")
     val compLevel = opt.getOrDefault("ndpcomplevel", "-100")
+    val test = opt.getOrDefault("currenttest", "Unknown Test")
     opt.put("path", path)
     opt.put("format", "parquet")
     opt.put("outputFormat", "binary")
     logger.info("Using compression: " + compression + " Level: " + compLevel)
-    val filtersJson = {
-      if (PushdownJson.validateFilters(filters)) {
-        val filtersJson = PushdownJson.getFiltersJson(filters)
-        // logger.warn("Pushdown " + opt.getOrDefault("currenttest", "") +
-        //            " Filter Json " + filtersJson)
-        filtersJson
-      } else {
-        logger.warn("No Pushdown " + filters.toString)
-        ""
+    var filtersStatus = PushdownJson.validateFilters(filters)
+    /* The below disables all filter pushdown */
+    // filtersStatus = PushdownJsonStatus.Invalid
+    var references = {
+      filtersStatus match {
+        case PushdownJsonStatus.Invalid =>
+          (attrReferences ++ filterReferences).distinct
+        case PushdownJsonStatus.PartiallyValid =>
+          (attrReferences ++ filterReferences).distinct
+        case PushdownJsonStatus.FullyValid =>
+          attrReferences.distinct
       }
     }
-    val hdfsScanObject = new HdfsOpScan(scanArgs._1, allReferences.toStructType,
-                                        opt, filtersJson,
-                                        needsRule = false )
-    val scanRelation = DataSourceV2ScanRelation(ndpRel.get,
-                                                hdfsScanObject, allReferences)
+    if (false) {
+      val filtersJson = PushdownJson.getFiltersJson(filters, test)
+      val fw = new FileWriter("/build/filters.txt", true)
+      try {
+        fw.write("Pushdown " + opt.getOrDefault("currenttest", "") +
+                " Filter Json " + filtersJson + "\n")
+      }
+      finally fw.close()
+    }
+    if (filtersStatus != PushdownJsonStatus.Invalid) {
+      val filtersJson = PushdownJson.getFiltersJson(filters, test)
+      logger.warn("Pushdown " + opt.getOrDefault("currenttest", "") +
+                  " Filter Json " + filtersJson)
+      opt.put("ndpjsonfilters", filtersJson)
+    } else {
+      logger.warn("No Pushdown " + filters.toString)
+    }
+    val hdfsScanObject = new HdfsOpScan(scanArgs._1, references.toStructType,
+                                        opt, needsRule = false )
+    val scanRelation = DataSourceV2ScanRelation(ndpRel.get, hdfsScanObject, references)
     val filterCondition = filters.reduceLeftOption(And)
-    val withFilter = filterCondition.map(LogicalFilter(_, scanRelation)).getOrElse(scanRelation)
+    val withFilter = {
+      if (filtersStatus == PushdownJsonStatus.FullyValid) {
+        /* Clip the filter from the DAG, since we are going to
+         * push down the entire filter to NDP.
+         */
+        scanRelation
+      } else {
+        filterCondition.map(LogicalFilter(_, scanRelation)).getOrElse(scanRelation)
+      }
+    }
     if (withFilter.output != project || filters.length == 0) {
       Project(project, withFilter)
     } else {
       withFilter
     }
   }
-  private def modifyLogicalPlan(plan: LogicalPlan): LogicalPlan = {
+  private def pushFilterProject(plan: LogicalPlan): LogicalPlan = {
     val newPlan = plan.transform {
       case s@ScanOperation(project,
                            filters,
@@ -332,9 +362,87 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     }
     newPlan
   }
+  private def transformAggregate(groupingExpressions: Seq[Expression],
+                                 aggregateExpressions: Seq[NamedExpression],
+                                 child: LogicalPlan): LogicalPlan = {
+    val aggExprToOutputOrdinal = mutable.HashMap.empty[Expression, Int]
+    var ordinal = 0
+    val aggregates = aggregateExpressions.flatMap { expr =>
+      expr.collect {
+        // Do not push down duplicated aggregate expressions. For example,
+        // `SELECT max(a) + 1, max(a) + 2 FROM ...`, we should only push down one
+        // `max(a)` to the data source.
+        case agg: AggregateExpression
+            if !aggExprToOutputOrdinal.contains(agg.canonicalized) =>
+          aggExprToOutputOrdinal(agg.canonicalized) = ordinal
+          ordinal += 1
+          agg
+      }
+    }
+    val schema = new StructType()
+    val newOutput = schema.map(f => AttributeReference(f.name, f.dataType,
+                                                       f.nullable, f.metadata)())
+    assert(newOutput.length == groupingExpressions.length + aggregates.length)
+    val groupAttrs = groupingExpressions.zip(newOutput).map {
+      case (a: Attribute, b: Attribute) => b.withExprId(a.exprId)
+      case (_, b) => b
+    }
+    val output = groupAttrs ++ newOutput.drop(groupAttrs.length)
+
+    /* logInfo(
+      s"""
+          |Pushing operators to ${sHolder.relation.name}
+          |Pushed Aggregate Functions:
+          | ${pushedAggregates.get.aggregateExpressions.mkString(", ")}
+          |Pushed Group by:
+          | ${pushedAggregates.get.groupByColumns.mkString(", ")}
+          |Output: ${output.mkString(", ")}
+          """.stripMargin) */
+    val relationArgs = child match {
+      case DataSourceV2ScanRelation(relation, scan, output) =>
+      (relation, scan, output)
+    }
+    val scanArgs = relationArgs._2 match {
+      case ParquetScan(_, _, _, dataSchema, _, _, _, opts, _, _) =>
+        (dataSchema, opts)
+      case HdfsOpScan(schema, _, opts, _) =>
+        (schema, opts)
+    }
+    val opt = new HashMap[String, String](scanArgs._2)
+    val hdfsScanObject = new HdfsOpScan(scanArgs._1, output.toStructType,
+                                        opt, needsRule = false )
+    val scanRelation = DataSourceV2ScanRelation(relationArgs._1,
+                                                hdfsScanObject, output)
+    val plan = Aggregate(
+                  output.take(groupingExpressions.length), aggregateExpressions, scanRelation)
+    plan
+  }
+  private def pushAggregate(plan: LogicalPlan): LogicalPlan = {
+    val newPlan = plan.transform {
+      case aggNode @ Aggregate(groupingExpressions, resultExpressions, childAgg) =>
+        childAgg match {
+          case s@ScanOperation(project,
+               filters,
+               child: DataSourceV2ScanRelation)
+            if filters.isEmpty =>
+              transformAggregate(groupingExpressions, resultExpressions, child)
+            aggNode
+          case r: DataSourceV2ScanRelation =>
+            aggNode
+          case other =>
+            aggNode
+        }
+    }
+    if (newPlan != plan) {
+      logger.info("before: \n" + plan)
+      logger.info("after: \n" + newPlan)
+    }
+    newPlan
+  }
   protected val logger = LoggerFactory.getLogger(getClass)
   def apply(inputPlan: LogicalPlan): LogicalPlan = {
-    val after = modifyLogicalPlan(inputPlan)
+    // val after = pushAggregate(pushFilterProject(inputPlan))
+    val after = pushFilterProject(inputPlan)
     after
   }
 }
