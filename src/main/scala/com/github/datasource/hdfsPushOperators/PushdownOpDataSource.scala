@@ -21,9 +21,8 @@ import java.util.HashMap
 
 import scala.collection.JavaConverters._
 
-import com.github.datasource.hdfs.{HdfsNdpInputFile, HdfsOpScan, HdfsStore}
+import com.github.datasource.hdfs.{HdfsOpScan, HdfsStore}
 import com.github.datasource.hdfs.PushdownOptimizationRule
-import com.github.datasource.s3.{S3Scan, S3Store}
 import org.apache.hadoop.fs.FileStatus
 import org.apache.hadoop.fs.FileSystem
 import org.apache.hadoop.fs.Path
@@ -62,7 +61,8 @@ class PushdownOpDatasource extends TableProvider
        */
       val path = options.get("path")
       // logger.info(s"inferSchema path: ${path}")
-      val fileStatusArray = HdfsStore.getFileStatusList(path)
+      val fileStatusArray = HdfsStore.getFileStatusList(path.replace("ndphdfs", "hdfs"))
+      logger.info("getting schema for: " + path)
       val schema = ParquetUtils.inferSchema(sparkSession, options.asScala.toMap, fileStatusArray)
       schema.get
     } else {
@@ -149,6 +149,6 @@ class PushdownOpScanBuilder(schema: StructType,
     if (!options.get("path").contains("hdfs")) {
       throw new Exception(s"endpoint ${options.get("endpoint")} is unexpected")
     }
-    new HdfsOpScan(schema, schema, opt)
+    new HdfsOpScan(schema, opt)
   }
 }

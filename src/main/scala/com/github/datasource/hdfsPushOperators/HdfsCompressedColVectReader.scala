@@ -21,7 +21,6 @@ import java.util
 
 import scala.collection.JavaConverters._
 
-import com.github.datasource.common.Pushdown
 import org.slf4j.LoggerFactory
 
 import org.apache.spark.TaskContext

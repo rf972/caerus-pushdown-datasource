@@ -275,7 +275,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     val scanArgs = relationArgs._2 match {
       case ParquetScan(_, _, _, dataSchema, _, _, _, opts, _, _) =>
         (dataSchema, opts)
-      case HdfsOpScan(schema, _, opts, _) =>
+      case HdfsOpScan(schema, opts) =>
         (schema, opts)
     }
     val filterReferencesEither = getFilterAttributes(filters)
@@ -323,8 +323,9 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     } else {
       logger.warn("No Pushdown " + filters.toString)
     }
-    val hdfsScanObject = new HdfsOpScan(scanArgs._1, references.toStructType,
-                                        opt, needsRule = false )
+    var cols = references.toStructType.fields.map(x => s"" + s"${x.name}").mkString(",")
+    opt.put("ndpprojectcolumns", cols)
+    val hdfsScanObject = new HdfsOpScan(references.toStructType, opt)
     val scanRelation = DataSourceV2ScanRelation(ndpRel.get, hdfsScanObject, references)
     val filterCondition = filters.reduceLeftOption(And)
     val withFilter = {
@@ -405,12 +406,11 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     val scanArgs = relationArgs._2 match {
       case ParquetScan(_, _, _, dataSchema, _, _, _, opts, _, _) =>
         (dataSchema, opts)
-      case HdfsOpScan(schema, _, opts, _) =>
+      case HdfsOpScan(schema, opts) =>
         (schema, opts)
     }
     val opt = new HashMap[String, String](scanArgs._2)
-    val hdfsScanObject = new HdfsOpScan(scanArgs._1, output.toStructType,
-                                        opt, needsRule = false )
+    val hdfsScanObject = new HdfsOpScan(output.toStructType, opt)
     val scanRelation = DataSourceV2ScanRelation(relationArgs._1,
                                                 hdfsScanObject, output)
     val plan = Aggregate(

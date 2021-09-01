@@ -21,7 +21,6 @@ import java.util
 import scala.collection.JavaConverters._
 import scala.collection.mutable.{ArrayBuffer}
 
-import com.github.datasource.common.Pushdown
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.BlockLocation
 import org.apache.hadoop.fs.Path
@@ -47,16 +46,10 @@ import org.apache.spark.util.SerializableConfiguration
 
 /** A scan object that works on HDFS files.
  *
- * @param schema the column format
  * @param options the options including "path"
- * @param filters the array of filters to push down
- * @param prunedSchema the new array of columns after pruning
- * @param pushedAggregation the array of aggregations to push down
  */
 case class HdfsOpScan(schema: StructType,
-                      inputReadSchema: StructType,
-                      options: util.Map[String, String],
-                      val needsRule: Boolean = true)
+                      options: util.Map[String, String])
       extends Scan with Batch {
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -93,17 +86,8 @@ case class HdfsOpScan(schema: StructType,
     }
     newSchema
   }
-  private val readSchemaVal: StructType = {
-    if (options.containsKey("JsonParams")) {
-      getJsonSchema(options.get("JsonParams"))
-    } else {
-      inputReadSchema
-    }
-  }
-  override def readSchema(): StructType = readSchemaVal
+  override def readSchema(): StructType = schema
 
-  protected val pushdown = new Pushdown(schema, readSchemaVal, Seq[Filter](),
-                                        None, options)
   private val maxPartSize: Long = (1024 * 1024 * 128)
   private var partitions: Array[InputPartition] = getPartitions()
 
@@ -155,8 +139,9 @@ case class HdfsOpScan(schema: StructType,
   private val sparkSession: SparkSession = SparkSession
       .builder()
       .getOrCreate()
-  private val broadcastedHadoopConf = HdfsColumnarReaderFactory.getHadoopConf(sparkSession,
-                                                                              pushdown.readSchema)
+  private val broadcastedHadoopConf =
+      sparkSession.sparkContext.broadcast(new SerializableConfiguration(
+            sparkSession.sessionState.newHadoopConf()))
   private val sqlConf = sparkSession.sessionState.conf
   /** Returns an Array of S3Partitions for a given input file.
    *  the file is selected by options("path").
@@ -167,7 +152,7 @@ case class HdfsOpScan(schema: StructType,
    * @return array of S3Partitions
    */
   private def getPartitions(): Array[InputPartition] = {
-    var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options,
+    var store: HdfsStore = HdfsStoreFactory.getStore(options,
                                                      sparkSession, new Configuration())
     val fileName = store.filePath
     val blocks : Map[String, Array[BlockLocation]] = store.getBlockList(fileName)
@@ -182,13 +167,8 @@ case class HdfsOpScan(schema: StructType,
     logger.info("Create Reader Factory " + {if (options.containsKey("JsonParams")) { "Json" }
     else { "original" } })
 
-    /* if (pushdown.schema.length == pushdown.prunedSchema.length) {
-      new HdfsColumnarPartitionReaderFactory(pushdown, options,
-                                             broadcastedHadoopConf, sqlConf)
-    } else { */
-      new HdfsBinColPartitionReaderFactory(pushdown, options,
-                                           broadcastedHadoopConf, sqlConf, true)
-    // }
+    new HdfsBinColPartitionReaderFactory(schema, options,
+                                         broadcastedHadoopConf, sqlConf)
   }
 }
 

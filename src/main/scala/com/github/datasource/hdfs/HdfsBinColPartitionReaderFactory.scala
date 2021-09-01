@@ -21,7 +21,6 @@ import java.util
 
 import scala.collection.JavaConverters._
 
-import com.github.datasource.common.Pushdown
 import org.slf4j.LoggerFactory
 
 import org.apache.spark.TaskContext
@@ -46,11 +45,10 @@ import org.apache.spark.util.SerializableConfiguration
  * @param pushdown has all pushdown options.
  * @param options the options including "path"
  */
-class HdfsBinColPartitionReaderFactory(pushdown: Pushdown,
+class HdfsBinColPartitionReaderFactory(schema: StructType,
                                        options: util.Map[String, String],
  sharedConf: Broadcast[org.apache.spark.util.SerializableConfiguration],
- sqlConf: SQLConf,
- opPushdown: Boolean)
+ sqlConf: SQLConf)
   extends PartitionReaderFactory {
   private val logger = LoggerFactory.getLogger(getClass)
   private val isCaseSensitive = sqlConf.caseSensitiveAnalysis
@@ -80,25 +78,19 @@ class HdfsBinColPartitionReaderFactory(pushdown: Pushdown,
 
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
     val part = partition.asInstanceOf[HdfsPartition]
-    var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options,
+    var store: HdfsStore = HdfsStoreFactory.getStore(options,
                                                      sparkSession, sharedConf.value.value)
     val reader =
-    if (!opPushdown) {
-      new HdfsBinColVectReader(pushdown.readSchema, 4 * 1024,
-                                          part,
-                                          store.getStream(part).asInstanceOf[DataInputStream])
-    } else {
       if (options.containsKey("ndpcompression") &&
           (options.get("ndpcompression") == "ZSTD")) {
-        new HdfsCompressedColVectReader(pushdown.prunedSchema, 8 * 1024,
+        new HdfsCompressedColVectReader(schema, 8 * 1024,
                                         part,
                                         store.getOpStream(part).asInstanceOf[DataInputStream])
       } else {
-        new HdfsBinColVectReader(pushdown.prunedSchema, 4 * 1024,
+        new HdfsBinColVectReader(schema, 4 * 1024,
                                  part,
                                  store.getOpStream(part).asInstanceOf[DataInputStream])
       }
-    }
     logger.info("HdfsBinColVectReader created row group " + part.index)
     new HdfsBinColPartitionReader(reader, batchSize)
       // This alternate factory below is identical to the above, but

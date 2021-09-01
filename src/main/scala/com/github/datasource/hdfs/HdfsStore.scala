@@ -30,8 +30,6 @@ import java.util.Locale
 import scala.collection.JavaConverters._
 import scala.util.control.NonFatal
 
-import com.github.datasource.common.Pushdown
-import com.github.datasource.parse.{BinaryRowIterator, ParquetRowIterator, RowIteratorFactory}
 import org.apache.commons.csv._
 import org.apache.commons.io.IOUtils
 import org.apache.commons.io.input.BoundedInputStream
@@ -76,32 +74,27 @@ import org.apache.spark.sql.types._
 object HdfsStoreFactory {
   /** Returns the store object.
    *
-   * @param pushdown object handling filter, project and aggregate pushdown
    * @param options the parameters including those to construct the store
    * @return a new HdfsStore object constructed with above parameters.
    */
-  def getStore(pushdown: Pushdown,
-               options: java.util.Map[String, String],
+  def getStore(options: java.util.Map[String, String],
                sparkSession: SparkSession,
                sharedConf: Configuration):
       HdfsStore = {
-    new HdfsStore(pushdown, options, sparkSession, sharedConf)
+    new HdfsStore(options, sparkSession, sharedConf)
   }
 }
 /** A hdfs store object which can connect
  *  to a file on hdfs filesystem, specified by options("path"),
  *  And which can read a partition with any of various pushdowns.
  *
- * @param pushdown object handling filter, project and aggregate pushdown
  * @param options the parameters including those to construct the store
  */
-class HdfsStore(pushdown: Pushdown,
-                options: java.util.Map[String, String],
+class HdfsStore(options: java.util.Map[String, String],
                 sparkSession: SparkSession,
                 sharedConf: Configuration) {
-  override def toString() : String = "HdfsStore" + options + pushdown.filters.mkString(", ")
+  override def toString() : String = "HdfsStore" + options
   protected val path = options.get("path")
-  protected val isPushdownNeeded: Boolean = pushdown.isPushdownNeeded
   protected val endpoint = {
     val server = path.split("/")(2)
     if (path.contains("ndphdfs://")) {
@@ -140,98 +133,7 @@ class HdfsStore(pushdown: Pushdown,
       FileSystem.get(URI.create(endpoint), conf)
     }
   }
-  protected val fileSystemType = fileSystem.getScheme
-  protected val traceReadable: Boolean =
-    (!options.containsKey("DisableCasts") && !options.containsKey("useColumnNames"))
 
-  /** Fetches the parameters of ProcessorRequest and requestQuery.
-   *  These are both needed for requests sent to the ndp server.
-   *  @param partition The partition to get the query for.
-   *  @return (String, String) - The Processor Request XML and the SQL Query.
-   */
-  def getQueryParams(partition: HdfsPartition): (String, String) = {
-    if (!isPushdownNeeded ||
-        fileSystemType != "ndphdfs") {
-      ("", "")
-    } else {
-      val (requestQuery, requestSchema) = {
-        if (traceReadable) {
-          logger.info("SQL Query (readable): " + pushdown.getReadableQuery(partition))
-        }
-        (pushdown.queryFromSchema(partition),
-         Pushdown.schemaString(pushdown.schema))
-      }
-      options.get("format") match {
-        case "parquet" => (new ProcessorRequestParquet(partition.modifiedTime, partition.index,
-                                requestQuery, partition.length,
-                                headerType).toXml, requestQuery)
-        case _ => (new ProcessorRequest(requestSchema, requestQuery, partition.length,
-                        headerType).toXml, requestQuery)
-      }
-    }
-  }
-  /** Opens a stream for the given HdfsPartition.
-   *  In the case of Ndp, it opens the stream with our
-   *  custom set of parameters.
-   *  @param partition the HdfsPartition to open
-   *  @return InputStream the input stream returned via the open call.
-   */
-  def open(partition: HdfsPartition): InputStream = {
-    val filePath = new Path(partition.name)
-    val (readParam, query) = getQueryParams(partition)
-    logger.info(readParam)
-    /* When we are targeting ndphdfs, but we do not have a pushdown,
-     * we will not pass the processor element.
-     * This allows the NDP server to optimize further.
-     */
-    if (isPushdownNeeded &&
-        fileSystemType == "ndphdfs") {
-        logger.info(s"SQL Query partition: ${partition.toString}")
-        logger.info(s"SQL Query: ${query}")
-        val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
-        val inStrm = fs.open(filePath, 4096, readParam).asInstanceOf[FSDataInputStream]
-        inStrm
-    } else {
-        val inStrm = fileSystem.open(filePath)
-        if (fileSystemType == "ndphdfs") {
-          logger.info(s"No Pushdown to ${fileSystemType} partition: ${partition.toString}")
-        }
-        inStrm
-    }
-  }
-
-  /** Returns a reader for a given Hdfs partition.
-   *  Determines the correct start offset by looking backwards
-   *  to find the end of the prior line.
-   *  Helps in cases where the last line of the prior partition
-   *  was split on the partition boundary.  In that case, the
-   *  prior partition's last (incomplete) is included in the next partition.
-   *
-   * @param partition the partition to read
-   * @return a new BufferedReader for this partition.
-   */
-  def getReader(partition: HdfsPartition,
-                startOffset: Long = 0, length: Long = 0): BufferedReader = {
-    val filePath = new Path(partition.name)
-    val (readParam, query) = getQueryParams(partition)
-    logger.info(readParam)
-    if (isPushdownNeeded &&
-        fileSystemType == "ndphdfs") {
-        logger.info(s"SQL Query reader partition: ${partition.toString}")
-        logger.info(s"SQL Query: ${query}")
-        val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
-        val inStrm = fs.open(filePath, 4096, readParam).asInstanceOf[FSDataInputStream]
-        inStrm.seek(partition.offset)
-        new BufferedReader(new InputStreamReader(inStrm))
-    } else {
-        val inStrm = fileSystem.open(filePath)
-        if (fileSystemType == "ndphdfs") {
-          logger.info(s"No Pushdown to ${fileSystemType} partition: ${partition.toString}")
-        }
-        inStrm.seek(startOffset)
-        new BufferedReader(new InputStreamReader(new BoundedInputStream(inStrm, length)))
-    }
-  }
   /** Returns a list of BlockLocation object representing
    *  all the hdfs blocks in a file.
    *
@@ -287,120 +189,9 @@ class HdfsStore(pushdown: Pushdown,
     // logger.info("fileStatus {}", fileStatus.toString)
     fileStatus.getModificationTime
   }
-  /** Returns the offset, length in bytes of an hdfs partition.
-   *  This takes into account any prior lines that might be incomplete
-   *  from the prior partition.
-   *
-   * @param partition the partition to find start for
-   * @return (offset, length) - Offset to begin reading partition, Length of partition.
-   */
-  @throws(classOf[Exception])
-  def getPartitionInfo(partition: HdfsPartition) : (Long, Long) = {
-    if (fileSystemType == "ndphdfs" &&
-        isPushdownNeeded) {
-      // No need to find offset, ndp server does this under the covers for us.
-      // When Processor is disabled, we need to deal with partial lines for ourselves.
-      return (partition.offset, partition.length)
-    }
-    val currentPath = new Path(partition.name)
-    var startOffset = partition.offset
-    var nextChar: Integer = 0
-    if (partition.offset != 0) {
-      /* Scan until we hit a newline. This skips the (normally) partial line,
-       * which the prior partition will read, and guarantees we get a full line.
-       * The only way to guarantee full lines is by reading up to the line terminator.
-       */
-      val inputStream = fileSystem.open(currentPath)
-      inputStream.seek(partition.offset)
-      val reader = new BufferedReader(new InputStreamReader(inputStream))
-      do {
-        nextChar = reader.read
-        startOffset += 1
-      } while ((nextChar.toChar != '\n') && (nextChar != -1));
-    }
-    var partitionLength = (partition.offset + partition.length) - startOffset
-    /* Scan up to the next line after the end of the partition.
-     * We always include this next line to ensure we are reading full lines.
-     * The only way to guarantee full lines is by reading up to the line terminator.
-     */
-    val inputStream = fileSystem.open(currentPath)
-    inputStream.seek(partition.offset + partition.length)
-    val reader = new BufferedReader(new InputStreamReader(inputStream))
-    do {
-      nextChar = reader.read
-      // Only count the char if we are not at end of line.
-      if (nextChar != -1) {
-        partitionLength += 1
-      }
-    } while ((nextChar.toChar != '\n') && (nextChar != -1));
-    // println(s"partition: ${partition.index} offset: ${startOffset} length: ${partitionLength}")
-    (startOffset, partitionLength)
-  }
-  /** The kind of header we should use.
-   *  In our case we only ever use None or Ignore, since
-   *  we use casts and column numbers, so the header is not needed.
-   * @return NONE or IGNORE
-   */
-  def headerType(): String = {
-    /* If we do not push down, then we will read from hdfs directly,
-     * and therefor need to skip the header ourselves.
-     * When we use ndp, it skips the header for us since we tell it about the header.
-     */
-    if (options.containsKey("header") && (options.get("header") == "true")) {
-      "IGNORE"
-    } else {
-      "NONE"
-    }
-  }
-  /** Returns true if we should skip the header.
-   *
-   * @param partition the partition to read
-   * @return true to skip the header and false otherwise.
-   */
-  def skipHeader(partition: HdfsPartition): Boolean = {
-    /* If we do not push down, then we will read from hdfs directly,
-     * and therefor need to skip the header ourselves.
-     * When we use ndp, it skips the header for us since we tell it about the header.
-     */
-    if (options.containsKey("header") && (options.get("header") == "true")) {
-      (partition.index == 0 && !isPushdownNeeded)
-    } else {
-      false
-    }
-  }
-  /** Returns an Iterator over InternalRow for a given Hdfs partition.
-   *
-   * @param partition the partition to read
-   * @return a new CsvRowIterator for this partition.
-   */
-  def getRowIter(partition: HdfsPartition): Iterator[InternalRow] = {
-    val (offset, length) = getPartitionInfo(partition)
-    RowIteratorFactory.getIterator(getReader(partition, offset, length),
-                                   pushdown.readSchema,
-                                   options.get("format"),
-                                   skipHeader(partition))
-  }
   /** Returns an InputStream on an NDP server.
    * @param partition the current partition
-   * @return InputStream for this partition, including pushdown.
-   */
-  def getStream(partition: HdfsPartition): InputStream = {
-    val filePath = new Path(partition.name)
-    val (readParam, query) = getQueryParams(partition)
-    logger.info(s"SQL Query stream partition: ${partition.toString}")
-    logger.info(s"SQL Query: ${query}")
-    val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
-    // logger.info("open fs rowGroup " + partition.index)
-    // HdfsStore.logStart(partition.index)
-    val inStrm = fs.open(filePath, 4096, readParam).asInstanceOf[FSDataInputStream]
-
-    // val INPUT_FILE = "/build/binary_out.bin";
-    // val inStrm = new FileInputStream(INPUT_FILE);
-    new DataInputStream(new BufferedInputStream(inStrm, 128*1024))
-  }
-  /** Returns an InputStream on an NDP server.
-   * @param partition the current partition
-   * @return InputStream for this partition, including pushdown.
+   * @return InputStream for this partition, including pushdown
    */
   def getOpStream(partition: HdfsPartition): InputStream = {
     val filePath = new Path(partition.name)
@@ -408,7 +199,7 @@ class HdfsStore(pushdown: Pushdown,
     val readParam = {
       options.get("format") match {
         case "parquet" =>
-          val columnList = pushdown.prunedSchema.fields.map(x => s"" + s"${x.name}")
+          val columnList = options.getOrDefault("ndpprojectcolumns", "").split(",")
           val fileName = partition.name.replace("ndphdfs://dikehdfs:9860", "")
           val compression = options.getOrDefault("ndpcompression", "None")
           val compLevel = options.getOrDefault("ndpcomplevel", "-100")
@@ -420,14 +211,6 @@ class HdfsStore(pushdown: Pushdown,
                                                     filters, test).toXml
           logger.info(lambdaXml.replace("\n", "").replace("  ", ""))
           lambdaXml
-        case "parquetold" =>
-          val columns = pushdown.prunedSchema.fields.map(x => s"" +
-                        s"${x.name}").mkString(",")
-          val requestQuery = s"SELECT ${columns} FROM s3Object"
-          logger.info(s"SQL Query: ${requestQuery}")
-          new ProcessorRequestParquet(partition.modifiedTime, partition.index,
-                                       requestQuery, partition.length,
-                                       headerType).toXml
       }
     }
     val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
@@ -435,29 +218,6 @@ class HdfsStore(pushdown: Pushdown,
     // HdfsStore.logStart(partition.index)
     val inStrm = fs.open(filePath, 4096, readParam).asInstanceOf[FSDataInputStream]
     new DataInputStream(new BufferedInputStream(inStrm, 128*1024))
-  }
-  /** Returns an Iterator over InternalRow for a given Hdfs partition.
-   *  This is for the case where our NDP Server returns csv format
-   *  for a parquet file.
-   *
-   * @param partition the partition to read
-   * @return a new CsvRowIterator for this partition.
-   */
-  def getRowIterParquet(partition: HdfsPartition): Iterator[InternalRow] = {
-    BinaryRowIterator(getStream(partition))
-  }
-  /** Returns an Iterator over InternalRow for a given Hdfs partition.
-   *  This is for the case where our NDP Server returns csv format
-   *  for a parquet file.
-   *
-   * @param partition the partition to read
-   * @return a new CsvRowIterator for this partition.
-   */
-  def getRowIterParquetOld(partition: HdfsPartition): Iterator[InternalRow] = {
-    RowIteratorFactory.getIterator(getReader(partition, 0, 0),
-                                   pushdown.readSchema,
-                                   "csv",
-                                   skipHeader(partition))
   }
 }
 
