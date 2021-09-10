@@ -158,21 +158,21 @@ object PushdownJson {
     }
     /* Traverse the tree and validate the nodes are supported. */
     expr match {
-      /* case Or(left, right) => validateFilterExpression(left, depth + 1) &&
+      case Or(left, right) => validateFilterExpression(left, depth + 1) &&
                               validateFilterExpression(right, depth + 1)
-      case And(left, right) => validateFilterExpression(left, depth + 1) &&
+      /* case And(left, right) => validateFilterExpression(left, depth + 1) &&
                               validateFilterExpression(right, depth + 1)
       case Not(filter) => validateFilterExpression(filter, depth + 1) */
       case EqualTo(left, right) => validateFilterExpression(left, depth + 1) &&
-                                   right.isInstanceOf[Literal]
+                                   validateFilterExpression(right, depth + 1)
       case LessThan(left, right) => validateFilterExpression(left, depth + 1) &&
-                                     right.isInstanceOf[Literal]
+                                     validateFilterExpression(right, depth + 1)
       case GreaterThan(left, right) => validateFilterExpression(left, depth + 1) &&
-                                       right.isInstanceOf[Literal]
+                                       validateFilterExpression(right, depth + 1)
       case LessThanOrEqual(left, right) => validateFilterExpression(left, depth + 1) &&
-                                           right.isInstanceOf[Literal]
+                                           validateFilterExpression(right, depth + 1)
       case GreaterThanOrEqual(left, right) => validateFilterExpression(left, depth + 1) &&
-                                              right.isInstanceOf[Literal]
+                                              validateFilterExpression(right, depth + 1)
       case IsNull(attr) => validateFilterExpression(attr, depth + 1)
       case IsNotNull(attr) => validateFilterExpression(attr, depth + 1)
       /* case StartsWith(left, right) => validateFilterExpression(left, depth + 1) &&

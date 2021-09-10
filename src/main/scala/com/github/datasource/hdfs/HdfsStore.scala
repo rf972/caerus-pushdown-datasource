@@ -195,7 +195,7 @@ class HdfsStore(options: java.util.Map[String, String],
    */
   def getOpStream(partition: HdfsPartition): InputStream = {
     val filePath = new Path(partition.name)
-    logger.info(s"SQL Query stream partition: ${partition.toString}")
+    logger.info(s"stream partition: ${partition.toString}")
     val readParam = {
       options.get("format") match {
         case "parquet" =>

@@ -69,6 +69,7 @@ class HdfsCompressedColVectReader(schema: StructType,
      * the the type of each column.  All values are doubles.
      */
     try {
+      // logger.info("reading cols from stream")
       val nColsLong = stream.readLong()
       val nCols: Integer = nColsLong.toInt
       // logger.info("nCols : " + String.valueOf(nCols))

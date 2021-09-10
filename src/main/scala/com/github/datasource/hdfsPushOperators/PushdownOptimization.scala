@@ -52,9 +52,9 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
       case a @ Alias(child, name) =>
         new Alias(mapAttribute(child, newProject).asInstanceOf[Expression],
                   name)(a.exprId, a.qualifier, a.explicitMetadata, a.nonInheritableMetadataKeys)
-      case Cast(expression, dataType, timeZoneId, ansiEnabled) =>
+      case Cast(expression, dataType, timeZoneId) =>
         new Cast(mapAttribute(expression, newProject).asInstanceOf[NamedExpression],
-                 dataType, timeZoneId, ansiEnabled)
+                 dataType, timeZoneId)
       case AttributeReference(name, dataType, nullable, meta) =>
         newProject.find(_.name == name).get
       case default => throw new Exception(s"Unknown: ${default}")
@@ -86,7 +86,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     origExpression match {
       case a @ Alias(child, name) =>
         getAttributeValues(child)
-      case Cast(expression, dataType, timeZoneId, ansiEnabled) =>
+      case Cast(expression, dataType, timeZoneId) =>
         getAttributeValues(expression)
       case AttributeReference(name, dataType, nullable, meta) =>
         (name, dataType.toString)
@@ -116,7 +116,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     origExpression match {
       case Alias(child, name) =>
         getAttribute(child)
-      case Cast(expression, dataType, timeZoneId, ansiEnabled) =>
+      case Cast(expression, dataType, timeZoneId) =>
         getAttribute(expression)
       case attrib @ AttributeReference(name, dataType, nullable, meta) =>
         EitherRight(attrib)

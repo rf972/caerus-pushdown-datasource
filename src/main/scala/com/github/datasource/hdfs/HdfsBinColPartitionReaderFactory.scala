@@ -83,7 +83,7 @@ class HdfsBinColPartitionReaderFactory(schema: StructType,
     val reader =
       if (options.containsKey("ndpcompression") &&
           (options.get("ndpcompression") == "ZSTD")) {
-        new HdfsCompressedColVectReader(schema, 8 * 1024,
+        new HdfsCompressedColVectReader(schema, 256 * 1024,
                                         part,
                                         store.getOpStream(part).asInstanceOf[DataInputStream])
       } else {
