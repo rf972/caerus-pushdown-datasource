@@ -87,7 +87,7 @@ class HdfsBinColPartitionReaderFactory(schema: StructType,
                                         part,
                                         store.getOpStream(part).asInstanceOf[DataInputStream])
       } else {
-        new HdfsBinColVectReader(schema, 4 * 1024,
+        new HdfsBinColVectReader(schema, 256 * 1024,
                                  part,
                                  store.getOpStream(part).asInstanceOf[DataInputStream])
       }

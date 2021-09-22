@@ -222,18 +222,20 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
         (schema, opts) */
     }
     if (scanArgs._1 == scanArgs._2) {
-      logger.info("Plan not modified. No Project Necessary. " +
+      logger.warn("Plan not modified. No Project Necessary. " +
                   (scanArgs._3).get("currenttest"))
       return false
     }
     val attrReferencesEither = getAttributeReferences(project)
     if (attrReferencesEither.isLeft) {
-      logger.info("Plan not modified due to project")
+      logger.warn("Plan not modified due to project" +
+                  (scanArgs._3).get("currenttest"))
       false
     } else {
       val filterReferencesEither = getFilterAttributes(filters)
       if (filterReferencesEither.isLeft) {
-        logger.info("Plan not modified due to filter")
+        logger.warn("Plan not modified due to filter" +
+                    (scanArgs._3).get("currenttest"))
         false
       } else {
         true
@@ -284,7 +286,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
       case EitherLeft(l) => Seq[AttributeReference]()
     }
     val opt = new HashMap[String, String](scanArgs._2)
-    val path = opt.get("path").replace("hdfs://dikehdfs:9000/", "ndphdfs://dikehdfs/")
+    val path = opt.get("path").replaceFirst("hdfs://.*:9000/", "ndphdfs://dikehdfs/")
     val ndpRel = getNdpRelation(path)
     val compression = opt.getOrDefault("ndpcompression", "None")
     val compLevel = opt.getOrDefault("ndpcomplevel", "-100")
@@ -306,10 +308,20 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
           attrReferences.distinct
       }
     }
+    var cols = references.toStructType.fields.map(x => s"" + s"${x.name}").mkString(",")
+    /* The below allows us to log the available filters
+     * for pushdown, even if we currently do not push these down.
+     * These get logged to filters.txt, along with the
+     * projects and the Spark view of the filters too.
+     */
     if (false) {
-      val filtersJson = PushdownJson.getFiltersJson(filters, test)
+      val filtersJson = PushdownJson.getFiltersJsonMaxDesired(filters, test)
       val fw = new FileWriter("/build/filters.txt", true)
       try {
+        fw.write("Pushdown " + opt.getOrDefault("currenttest", "") +
+                " Filters " + filters.mkString(", ") + "\n")
+        fw.write("Pushdown " + opt.getOrDefault("currenttest", "") +
+                " Projects " + cols + "\n")
         fw.write("Pushdown " + opt.getOrDefault("currenttest", "") +
                 " Filter Json " + filtersJson + "\n")
       }
@@ -323,7 +335,6 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     } else {
       logger.warn("No Pushdown " + filters.toString)
     }
-    var cols = references.toStructType.fields.map(x => s"" + s"${x.name}").mkString(",")
     opt.put("ndpprojectcolumns", cols)
     val hdfsScanObject = new HdfsOpScan(references.toStructType, opt)
     val scanRelation = DataSourceV2ScanRelation(ndpRel.get, hdfsScanObject, references)

@@ -93,10 +93,17 @@ object HdfsStoreFactory {
 class HdfsStore(options: java.util.Map[String, String],
                 sparkSession: SparkSession,
                 sharedConf: Configuration) {
+  protected val logger = LoggerFactory.getLogger(getClass)
   override def toString() : String = "HdfsStore" + options
   protected val path = options.get("path")
+  protected val origServerFull = path.split("[/:]").filter(_.nonEmpty)(1)
+  protected val origServerPort = path.split("[/]").filter(_.nonEmpty)(1)
+  /* HDFS_PATH is the location of the HDFS server.
+   */
+  protected val server = sys.env.getOrElse("HDFS_PATH", origServerFull)
+  logger.info("path is " + path)
+  logger.info("server is " + server)
   protected val endpoint = {
-    val server = path.split("/")(2)
     if (path.contains("ndphdfs://")) {
       ("ndphdfs://" + server + ":9860")
     } else if (path.contains("webhdfs://")) {
@@ -105,23 +112,25 @@ class HdfsStore(options: java.util.Map[String, String],
       ("hdfs://" + server + ":9000")
     }
   }
-  val filePath = {
-    val server = path.split("/")(2)
+  val filePath = getFilePath(path)
+
+  def getFilePath(path: String): String = {
     if (path.contains("ndphdfs://")) {
-      val str = path.replace("ndphdfs://" + server, "ndphdfs://" + server + ":9860")
+      val serverPort = path.split("[/]").filter(_.nonEmpty)(1)
+      val str = path.replace("ndphdfs://" + serverPort, "ndphdfs://" + server + ":9860")
       str
     } else if (path.contains("webhdfs")) {
-      path.replace(server, server + ":9870")
+      path.replace(origServerPort, server + ":9870")
     } else {
-      path.replace(server, server + ":9000")
+      path.replace(origServerPort, server + ":9000")
     }
   }
-  protected val logger = LoggerFactory.getLogger(getClass)
   protected val configure: Configuration = {
     /* val conf = new Configuration()
     conf.set("dfs.datanode.drop.cache.behind.reads", "true")
     conf.set("dfs.client.cache.readahead", "0") */
     sharedConf.set("fs.ndphdfs.impl", classOf[org.dike.hdfs.NdpHdfsFileSystem].getName)
+    sharedConf.set("dfs.client.use.datanode.hostname", "true")
     sharedConf
   }
   protected val fileSystem = {
@@ -143,7 +152,7 @@ class HdfsStore(options: java.util.Map[String, String],
    */
   def getBlockList(fileName: String) : scala.collection.immutable.Map[String,
     Array[BlockLocation]] = {
-    val fileToRead = new Path(fileName)
+    val fileToRead = new Path(fileName.replace(origServerPort, server))
     val fileStatus = fileSystem.getFileStatus(fileToRead)
     val blockMap = scala.collection.mutable.Map[String, Array[BlockLocation]]()
     if (fileSystem.isFile(fileToRead)) {
@@ -194,7 +203,6 @@ class HdfsStore(options: java.util.Map[String, String],
    * @return InputStream for this partition, including pushdown
    */
   def getOpStream(partition: HdfsPartition): InputStream = {
-    val filePath = new Path(partition.name)
     logger.info(s"stream partition: ${partition.toString}")
     val readParam = {
       options.get("format") match {
@@ -206,9 +214,9 @@ class HdfsStore(options: java.util.Map[String, String],
           val test = options.getOrDefault("currenttest", "Unknown Test")
           val filters = options.getOrDefault("ndpjsonfilters", "")
           val lambdaXml = new ProcessorRequestLambda(partition.modifiedTime, partition.index,
-                                                    columnList, fileName,
-                                                    compression, compLevel,
-                                                    filters, test).toXml
+                                                     columnList, fileName,
+                                                     compression, compLevel,
+                                                     filters, test).toXml
           logger.info(lambdaXml.replace("\n", "").replace("  ", ""))
           lambdaXml
       }
@@ -216,7 +224,8 @@ class HdfsStore(options: java.util.Map[String, String],
     val fs = fileSystem.asInstanceOf[NdpHdfsFileSystem]
     // logger.info("open fs rowGroup " + partition.index)
     // HdfsStore.logStart(partition.index)
-    val inStrm = fs.open(filePath, 4096, readParam).asInstanceOf[FSDataInputStream]
+    val inFile = getFilePath(partition.name)
+    val inStrm = fs.open(new Path(inFile), 4096, readParam).asInstanceOf[FSDataInputStream]
     new DataInputStream(new BufferedInputStream(inStrm, 128*1024))
   }
 }

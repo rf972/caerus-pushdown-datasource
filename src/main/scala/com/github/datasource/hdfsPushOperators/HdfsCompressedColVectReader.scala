@@ -69,6 +69,7 @@ class HdfsCompressedColVectReader(schema: StructType,
      * the the type of each column.  All values are doubles.
      */
     try {
+      // logger.info(s"Data Read Starting ${part.name}")
       // logger.info("reading cols from stream")
       val nColsLong = stream.readLong()
       val nCols: Integer = nColsLong.toInt
@@ -120,7 +121,7 @@ class HdfsCompressedColVectReader(schema: StructType,
     columnarBatch.setNumRows(0)
     val rows = readNextBatch()
     if (rows == 0) {
-      // logger.info(s"nextBatch Done rows: ${rows} total: ${rowsReturned}")
+      // logger.info(s"Data Read Complete ${part.name}")
     }
     rowsReturned += rows
     columnarBatch.setNumRows(rows.toInt)

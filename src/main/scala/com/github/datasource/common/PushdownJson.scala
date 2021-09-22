@@ -151,6 +151,27 @@ object PushdownJson {
     val indented = (new JSONObject(jsonString)).toString(4)
     indented
   }
+  def getFiltersJsonMaxDesired(filters: Seq[Expression], test: String): String = {
+    val filterNodeBuilder = Json.createObjectBuilder()
+    filterNodeBuilder.add("Name", test)
+    filterNodeBuilder.add("Type", "_FILTER")
+    val filterArrayBuilder = Json.createArrayBuilder()
+    for (f <- filters) {
+      if (validateMaxDesiredFilter(f)) {
+        val j = buildFiltersJson(f)
+        filterArrayBuilder.add(j)
+      }
+    }
+    filterNodeBuilder.add("FilterArray", filterArrayBuilder)
+
+    val stringWriter = new StringWriter()
+    val writer = Json.createWriter(stringWriter)
+    writer.writeObject(filterNodeBuilder.build())
+    writer.close()
+    val jsonString = stringWriter.getBuffer().toString()
+    val indented = (new JSONObject(jsonString)).toString(4)
+    indented
+  }
   def validateFilterExpression(expr: Expression, depth: Int = 0): Boolean = {
     if (depth > filterMaxDepth) {
       /* Reached depth unsupported by NDP server. */
@@ -181,6 +202,41 @@ object PushdownJson {
                                     validateFilterExpression(right, depth + 1)
       case Contains(left, right) => validateFilterExpression(left, depth + 1) &&
                                     validateFilterExpression(right, depth + 1) */
+      case attrib @ AttributeReference(name, dataType, nullable, meta) =>
+        true
+      case Literal(value, dataType) =>
+        true
+      case other@_ => logger.warn("unknown filter:" + other)
+        /* Reached an unknown node, return validation failed. */
+        false
+    }
+  }
+  def validateMaxDesiredFilter(expr: Expression, depth: Int = 0): Boolean = {
+    /* Traverse the tree and validate the nodes are supported. */
+    expr match {
+      case Or(left, right) => validateMaxDesiredFilter(left, depth + 1) &&
+                              validateMaxDesiredFilter(right, depth + 1)
+      case And(left, right) => validateMaxDesiredFilter(left, depth + 1) &&
+                              validateMaxDesiredFilter(right, depth + 1)
+      case Not(filter) => validateMaxDesiredFilter(filter, depth + 1)
+      case EqualTo(left, right) => validateMaxDesiredFilter(left, depth + 1) &&
+                                   validateMaxDesiredFilter(right, depth + 1)
+      case LessThan(left, right) => validateMaxDesiredFilter(left, depth + 1) &&
+                                     validateMaxDesiredFilter(right, depth + 1)
+      case GreaterThan(left, right) => validateMaxDesiredFilter(left, depth + 1) &&
+                                       validateMaxDesiredFilter(right, depth + 1)
+      case LessThanOrEqual(left, right) => validateMaxDesiredFilter(left, depth + 1) &&
+                                           validateMaxDesiredFilter(right, depth + 1)
+      case GreaterThanOrEqual(left, right) => validateMaxDesiredFilter(left, depth + 1) &&
+                                              validateMaxDesiredFilter(right, depth + 1)
+      case IsNull(attr) => validateMaxDesiredFilter(attr, depth + 1)
+      case IsNotNull(attr) => validateMaxDesiredFilter(attr, depth + 1)
+      case StartsWith(left, right) => validateMaxDesiredFilter(left, depth + 1) &&
+                                    validateMaxDesiredFilter(right, depth + 1)
+      case EndsWith(left, right) => validateMaxDesiredFilter(left, depth + 1) &&
+                                    validateMaxDesiredFilter(right, depth + 1)
+      case Contains(left, right) => validateMaxDesiredFilter(left, depth + 1) &&
+                                    validateMaxDesiredFilter(right, depth + 1)
       case attrib @ AttributeReference(name, dataType, nullable, meta) =>
         true
       case Literal(value, dataType) =>
