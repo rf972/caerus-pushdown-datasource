@@ -21,7 +21,6 @@ import java.util
 
 import scala.collection.JavaConverters._
 
-import com.github.datasource.common.Pushdown
 import org.slf4j.LoggerFactory
 
 import org.apache.spark.TaskContext
@@ -46,7 +45,7 @@ import org.apache.spark.util.SerializableConfiguration
  * @param pushdown has all pushdown options.
  * @param options the options including "path"
  */
-class HdfsBinColPartitionReaderFactory(pushdown: Pushdown,
+class HdfsBinColPartitionReaderFactory(schema: StructType,
                                        options: util.Map[String, String],
  sharedConf: Broadcast[org.apache.spark.util.SerializableConfiguration],
  sqlConf: SQLConf)
@@ -79,11 +78,19 @@ class HdfsBinColPartitionReaderFactory(pushdown: Pushdown,
 
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
     val part = partition.asInstanceOf[HdfsPartition]
-    var store: HdfsStore = HdfsStoreFactory.getStore(pushdown, options,
+    var store: HdfsStore = HdfsStoreFactory.getStore(options,
                                                      sparkSession, sharedConf.value.value)
-    val reader = new HdfsBinColVectReader(pushdown.readSchema, 4 * 1024,
-                                          part,
-                                          store.getStream(part).asInstanceOf[DataInputStream])
+    val reader =
+      if (options.containsKey("ndpcompression") &&
+          (options.get("ndpcompression") == "ZSTD")) {
+        new HdfsCompressedColVectReader(schema, 256 * 1024,
+                                        part,
+                                        store.getOpStream(part).asInstanceOf[DataInputStream])
+      } else {
+        new HdfsBinColVectReader(schema, 256 * 1024,
+                                 part,
+                                 store.getOpStream(part).asInstanceOf[DataInputStream])
+      }
     logger.info("HdfsBinColVectReader created row group " + part.index)
     new HdfsBinColPartitionReader(reader, batchSize)
       // This alternate factory below is identical to the above, but
@@ -99,7 +106,7 @@ class HdfsBinColPartitionReaderFactory(pushdown: Pushdown,
  * @param vectorizedReader - Already initialized HdfsBinColVectReader
  *                           which provides the data for the PartitionReader.
  */
-class HdfsBinColPartitionReader(vectorizedReader: HdfsBinColVectReader,
+class HdfsBinColPartitionReader(vectorizedReader: HdfsColVectReader,
                                 batchSize: Integer)
   extends PartitionReader[ColumnarBatch] {
   private val logger = LoggerFactory.getLogger(getClass)
@@ -109,97 +116,4 @@ class HdfsBinColPartitionReader(vectorizedReader: HdfsBinColVectReader,
     batch
   }
   override def close(): Unit = vectorizedReader.close()
-}
-
-/** Allows for reading batches of columns from NDP
- *  using the NDP binary columnar format.
- *
- *  @param schema
- *  @param batchSize the number of rows in a batch
- *  @param part the current hdfs partition
- *  @param stream the data stream attached to NDP.
- */
-class HdfsBinColVectReader(schema: StructType,
-                           batchSize: Integer,
-                           part: HdfsPartition,
-                           stream: DataInputStream) {
-  private val logger = LoggerFactory.getLogger(getClass)
-  def next(): Boolean = {
-    nextBatch()
-  }
-  def get(): ColumnarBatch = {
-    columnarBatch
-  }
-  def close(): Unit = {
-  }
-  private var rowsReturned: Long = 0
-  private var currentBatchSize: Int = 0
-  private var batchIdx: Long = 0
-  private val (numCols: Integer, dataTypes: Array[Int]) = {
-    /* The NDP server encodes the number of columns followed by
-     * the the type of each column.  All values are doubles.
-     */
-    try {
-      val nColsLong = stream.readLong()
-      val nCols: Integer = nColsLong.toInt
-      // logger.info("nCols : " + String.valueOf(nCols))
-      val dataTypes = new Array[Int](nCols)
-      for (i <- 0 to nCols - 1) {
-        dataTypes(i) = (stream.readLong()).toInt
-        // logger.info(String.valueOf(i) + " : " + String.valueOf(dataTypes(i)))
-      }
-      (nCols, dataTypes)
-    } catch {
-        case ex: Exception =>
-        /* We do not expect to hit end of file, but if we do, it might mean that
-         * the NDP query had nothing to return.
-         */
-          logger.info("Init Exception: " + ex)
-          (0, new Array[Int](0))
-        case ex: Throwable =>
-          logger.info("Init Throwable: " + ex)
-          (0, new Array[Int](0))
-    }
-  }
-  val ndpColVectors = NdpColumnVector(batchSize, dataTypes, schema)
-  val columnarBatch = new ColumnarBatch(ndpColVectors.asInstanceOf[Array[ColumnVector]])
-  /** Fetches the next set of columns from the stream, returning the
-   *  number of rows that were returned.
-   *  We expect all columns to return the same number of rows.
-   *
-   *  @return Integer, the number of rows returned for the batch.
-   */
-  def readNextBatch(): Integer = {
-    var rows: Integer = 0
-    for (i <- 0 until numCols) {
-      val currentRows = ndpColVectors(i).readColumn(stream)
-      if (rows == 0) {
-        rows = currentRows
-      } else if (rows != 0 && currentRows != rows) {
-        // We expect all rows in the batch to be the same size.
-        throw new Exception("mismatch in rows ${currentRows} != ${rows}")
-      }
-    }
-    rows
-  }
-  /**
-   * Advances to the next batch of rows. Returns false if there are no more.
-   * @return Boolean, true if more rows, false if none.
-   */
-  def nextBatch(): Boolean = {
-    columnarBatch.setNumRows(0)
-    val rows = readNextBatch()
-    if (rows == 0) {
-      // logger.info(s"nextBatch Done rows: ${rows} total: ${rowsReturned}")
-    }
-    rowsReturned += rows
-    columnarBatch.setNumRows(rows.toInt)
-    currentBatchSize = rows
-    batchIdx = 0
-    if (rows > 0) {
-      true
-    } else {
-      false
-    }
-  }
 }

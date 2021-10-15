@@ -32,13 +32,11 @@ import org.apache.spark.sql.connector.read.InputPartition
  * @param rowGroup the row group to read.
  * @param query the SQL operation to perform or empty string if none.
  * @param blockSize the length in bytes of the blocks we are reading.
- * @param header the type of header (NONE, IGNORE, SKIP).
  */
 class ProcessorRequestParquet(accessTime: Long,
                               rowGroup: Long,
                               query: String,
-                              blockSize: Long,
-                              header: String) {
+                              blockSize: Long) {
 
     private val logger = LoggerFactory.getLogger(getClass)
 
