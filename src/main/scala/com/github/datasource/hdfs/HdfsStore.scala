@@ -25,6 +25,7 @@ import java.io.InputStreamReader
 import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.util
+import java.util.HashMap
 import java.util.Locale
 
 import scala.collection.JavaConverters._
@@ -391,5 +392,55 @@ object HdfsStore {
         statusArray.toSeq
       }
       fileStatusArray
+  }
+  def getFilePartitions(filePath: String): Integer = {
+    val files = Map("lineitem.parquet" -> 172,
+                    "part.parquet" -> 5)
+    var partitions = 0
+    for ((f, v) <- files) {
+      if (filePath.contains(f)) {
+        partitions = files(f)
+        logger.info(s"found {} partitions for file {}", partitions, filePath)
+      }
+    }
+    if (partitions == 0) {
+      val conf = new Configuration()
+      val readOptions = HadoopReadOptions.builder(conf)
+                                         .build()
+      val reader = ParquetFileReader.open(HadoopInputFile.fromPath(new Path(filePath),
+                                                                   conf), readOptions)
+      val parquetBlocks = reader.getFooter.getBlocks
+      partitions = parquetBlocks.size
+      logger.info(s"parquet MR {} partitions for file {}", partitions, filePath)
+    }
+    partitions
+  }
+  /** Sends a read ahead operation to NDP Server
+   * @param options all parameters for the request, including
+   *                path of the file, json filters, and json aggregate
+   */
+  def sendReadAhead(options: HashMap[String, String]): Unit = {
+    val filePath = options.get("path")
+    val readParam = {
+      options.get("format") match {
+        case "parquet" =>
+          val columnList = options.getOrDefault("ndpprojectcolumns", "").split(",")
+          val fName = filePath.replace("ndphdfs://dikehdfs:9860", "")
+          val compression = options.getOrDefault("ndpcompression", "None")
+          val compLevel = options.getOrDefault("ndpcomplevel", "-100")
+          val test = options.getOrDefault("currenttest", "Unknown Test")
+          val filters = options.getOrDefault("ndpjsonfilters", "")
+          val lambdaXml = new ProcessorRequestLambda(0, 0,
+                                                     columnList, fName,
+                                                     compression, compLevel,
+                                                     filters, test).toXml
+          logger.info(lambdaXml.replace("\n", "").replace("  ", ""))
+          lambdaXml
+      }
+    }
+    val fs: FileSystem = getFileSystem(filePath)
+    val fsc = fs.asInstanceOf[NdpHdfsFileSystem]
+    val inFile = getFilePath(filePath)
+    val inStrm = fsc.open(new Path(inFile), 4096, readParam).asInstanceOf[FSDataInputStream]
   }
 }

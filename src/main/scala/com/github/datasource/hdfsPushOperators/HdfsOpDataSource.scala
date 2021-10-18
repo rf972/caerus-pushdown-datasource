@@ -116,20 +116,28 @@ case class HdfsOpScan(schema: StructType,
     } else {
       // Generate one partition per file, per hdfs block
       for ((fName, blockList) <- blockMap) {
-        val reader = ParquetFileReader.open(HadoopInputFile.fromPath(new Path(fName),
-                                                                     conf), readOptions)
-        val parquetBlocks = reader.getFooter.getBlocks
+        val mTime = store.getModifiedTime(fName)
+        // val reader = ParquetFileReader.open(HadoopInputFile.fromPath(new Path(fName),
+        //                                                             conf), readOptions)
 
+        // val parquetBlocks = reader.getFooter.getBlocks
+        val partitions = HdfsStore.getFilePartitions(fName)
+        // val partitions = parquetBlocks.size
         // Generate one partition per row Group.
-        for (i <- 0 to parquetBlocks.size - 1) {
+        for (i <- 0 to partitions - 1) {
         // for (i <- 0 until 0) {
-          val parquetBlock = parquetBlocks.get(i)
+          // val parquetBlock = parquetBlocks.get(i)
           // logger.info(s"Create partition: ${fName} receivedPushdown: ${receivedPushdown}")
-          a += new HdfsPartition(index = i, offset = parquetBlock.getStartingPos,
+          a += new HdfsPartition(index = i, offset = 0,
+                                 length = 1,
+                                 name = fName,
+                                 rows = 1,
+                                 mTime)
+          /* offset = parquetBlock.getStartingPos,
                                  length = parquetBlock.getCompressedSize,
                                  name = fName,
                                  rows = parquetBlock.getRowCount,
-                                 store.getModifiedTime(fName))
+                                 store.getModifiedTime(fName)) */
         }
       }
     }
@@ -157,7 +165,9 @@ case class HdfsOpScan(schema: StructType,
     val fileName = store.filePath
     val blocks : Map[String, Array[BlockLocation]] = store.getBlockList(fileName)
     options.get("format") match {
-      case "parquet" => createPartitionsParquet(blocks, store)
+      case "parquet" =>
+        val p = createPartitionsParquet(blocks, store)
+        p
     }
   }
   override def planInputPartitions(): Array[InputPartition] = {
