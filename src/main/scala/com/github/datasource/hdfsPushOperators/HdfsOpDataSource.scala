@@ -89,7 +89,7 @@ case class HdfsOpScan(schema: StructType,
   override def readSchema(): StructType = schema
 
   private val maxPartSize: Long = (1024 * 1024 * 128)
-  private var partitions: Array[InputPartition] = getPartitions()
+  private var partitions: Array[InputPartition] = Array[InputPartition]()
 
   private def createPartitionsParquet(blockMap: Map[String, Array[BlockLocation]],
                                       store: HdfsStore): Array[InputPartition] = {
@@ -116,28 +116,24 @@ case class HdfsOpScan(schema: StructType,
     } else {
       // Generate one partition per file, per hdfs block
       for ((fName, blockList) <- blockMap) {
-        val mTime = store.getModifiedTime(fName)
-        // val reader = ParquetFileReader.open(HadoopInputFile.fromPath(new Path(fName),
-        //                                                             conf), readOptions)
+        // val mTime = store.getModifiedTime(fName)
 
-        // val parquetBlocks = reader.getFooter.getBlocks
-        val partitions = HdfsStore.getFilePartitions(fName)
-        // val partitions = parquetBlocks.size
+        val partitions =
+          if (options.containsKey("processorid")) {
+            HdfsStore.getFilePartitions(fName, options.get("processorid"))
+          } else {
+            // If the processid is not set, we might be initializing a relation.
+            // Without the intention to actually do a query.
+            // If so, we will simply return 0, to avoid initting any partitions.
+            0
+          }
         // Generate one partition per row Group.
         for (i <- 0 to partitions - 1) {
-        // for (i <- 0 until 0) {
-          // val parquetBlock = parquetBlocks.get(i)
-          // logger.info(s"Create partition: ${fName} receivedPushdown: ${receivedPushdown}")
           a += new HdfsPartition(index = i, offset = 0,
                                  length = 1,
                                  name = fName,
                                  rows = 1,
-                                 mTime)
-          /* offset = parquetBlock.getStartingPos,
-                                 length = parquetBlock.getCompressedSize,
-                                 name = fName,
-                                 rows = parquetBlock.getRowCount,
-                                 store.getModifiedTime(fName)) */
+                                 0)
         }
       }
     }
@@ -171,6 +167,9 @@ case class HdfsOpScan(schema: StructType,
     }
   }
   override def planInputPartitions(): Array[InputPartition] = {
+    if (partitions.length == 0) {
+      partitions = getPartitions()
+    }
     partitions
   }
   override def createReaderFactory(): PartitionReaderFactory = {
