@@ -35,6 +35,9 @@ libraryDependencies ++= Seq(
 libraryDependencies += "org.scala-lang.modules" %% "scala-xml" % "2.0.0-M3"
 libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.2" % "test"
 libraryDependencies += "org.apache.commons" % "commons-lang3" % "3.10" % "test"
+// libraryDependencies += "org.apache.spark" %% "spark-core" % "3.2.0" % "provided"
+// libraryDependencies += "org.apache.spark" %% "spark-sql" % "3.2.0" % "provided"
+// libraryDependencies += "org.apache.spark" %% "spark-catalyst" % "3.2.0" % "provided"
 
 libraryDependencies ++= Seq(
   "org.scala-lang" % "scala-library" % scalaVersion.value % "compile",

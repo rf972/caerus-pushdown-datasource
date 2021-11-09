@@ -33,6 +33,7 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.connector.catalog.{SessionConfigSupport, SupportsRead,
                                                Table, TableCapability, TableProvider}
 import org.apache.spark.sql.connector.expressions._
+import org.apache.spark.sql.connector.expressions.aggregate.{Aggregation => ExprAgg}
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils
 import org.apache.spark.sql.sources._
@@ -125,7 +126,7 @@ class PushdownScanBuilder(schema: StructType,
   private val logger = LoggerFactory.getLogger(getClass)
   var pushedFilter: Array[Filter] = new Array[Filter](0)
   private var prunedSchema: StructType = schema
-  private var pushedAggregations = Option.empty[Aggregation]
+  private var pushedAggregations = Option.empty[ExprAgg]
 
   /** Returns a scan object for this particular query.
    *   Currently we only support S3 and Hdfs.
@@ -230,7 +231,7 @@ class PushdownScanBuilder(schema: StructType,
    * @param aggregation list of aggreates, assumption is that
    *                    these are "and" separated.
    */
-  override def pushAggregation(aggregation: Aggregation): Boolean = {
+  override def pushAggregation(aggregation: ExprAgg): Boolean = {
     val pushdown = new Pushdown(schema, prunedSchema, pushedFilter,
                                 Some(aggregation), options)
     if (pushdownSupported() &&

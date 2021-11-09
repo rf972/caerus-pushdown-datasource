@@ -28,6 +28,7 @@ import org.slf4j.LoggerFactory
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.expressions._
+import org.apache.spark.sql.connector.expressions.aggregate.{Aggregation => ExprAgg}
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types._
@@ -43,7 +44,7 @@ import org.apache.spark.sql.types._
 class S3Scan(schema: StructType,
              options: util.Map[String, String],
              filters: Array[Filter], prunedSchema: StructType,
-             pushedAggregation: Option[Aggregation])
+             pushedAggregation: Option[ExprAgg])
       extends Scan with Batch {
 
   private val logger = LoggerFactory.getLogger(getClass)

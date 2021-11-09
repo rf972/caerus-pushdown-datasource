@@ -33,6 +33,7 @@ import scala.collection.mutable.ArrayBuilder
 import org.slf4j.LoggerFactory
 
 import org.apache.spark.sql.connector.expressions._
+import org.apache.spark.sql.connector.expressions.aggregate.{AggregateFunc, Aggregation => ExprAgg, Count, CountStar, Max, Min, Sum}
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types._
 
@@ -43,7 +44,7 @@ import org.apache.spark.sql.types._
  */
 class Pushdown(val schema: StructType, val prunedSchema: StructType,
                val filters: Seq[Filter],
-               val aggregation: Option[Aggregation],
+               val aggregation: Option[ExprAgg],
                val options: util.Map[String, String]) extends Serializable {
 
   protected val logger = LoggerFactory.getLogger(getClass)
@@ -190,7 +191,7 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
    * @param aggregates the array of aggregates to translate
    * @return array of strings
    */
-  def compileAggregates(agg: Option[Aggregation]) : (Array[String], Array[DataType]) = {
+  def compileAggregates(agg: Option[ExprAgg]) : (Array[String], Array[DataType]) = {
     val aggregates: Seq[AggregateFunc] = {
       if (agg == None) {
         Seq.empty[AggregateFunc]
@@ -293,7 +294,7 @@ class Pushdown(val schema: StructType, val prunedSchema: StructType,
   def quoteIdentifierGroupBy(colName: String): String = {
     s"${getColString(colName)}"
   }
-  private def getGroupByClause(aggregation: Option[Aggregation]): String = {
+  private def getGroupByClause(aggregation: Option[ExprAgg]): String = {
     if ((aggregation != None) &&
         (aggregation.get.groupByColumns.length > 0)) {
       val quotedColumns =
