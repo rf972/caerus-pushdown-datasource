@@ -319,21 +319,22 @@ class HdfsStore(pushdown: Pushdown,
       } while ((nextChar.toChar != '\n') && (nextChar != -1));
     }
     var partitionLength = (partition.offset + partition.length) - startOffset
-    /* Scan up to the next line after the end of the partition.
-     * We always include this next line to ensure we are reading full lines.
-     * The only way to guarantee full lines is by reading up to the line terminator.
-     */
-    val inputStream = fileSystem.open(currentPath)
-    inputStream.seek(partition.offset + partition.length)
-    val reader = new BufferedReader(new InputStreamReader(inputStream))
-    do {
-      nextChar = reader.read
-      // Only count the char if we are not at end of line.
-      if (nextChar != -1) {
-        partitionLength += 1
-      }
-    } while ((nextChar.toChar != '\n') && (nextChar != -1));
-    // println(s"partition: ${partition.index} offset: ${startOffset} length: ${partitionLength}")
+    if (!partition.last) {
+     /* Scan up to the next line after the end of the partition.
+      * We always include this next line to ensure we are reading full lines.
+      * The only way to guarantee full lines is by reading up to the line terminator.
+      */
+      val inputStream = fileSystem.open(currentPath)
+      inputStream.seek(partition.offset + partition.length)
+      val reader = new BufferedReader(new InputStreamReader(inputStream))
+      do {
+        nextChar = reader.read
+        // Only count the char if we are not at end of line.
+        if (nextChar != -1) {
+          partitionLength += 1
+        }
+      } while ((nextChar.toChar != '\n') && (nextChar != -1));
+    }
     (startOffset, partitionLength)
   }
   /** The kind of header we should use.

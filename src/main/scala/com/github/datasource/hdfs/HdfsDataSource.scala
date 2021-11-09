@@ -97,7 +97,8 @@ class HdfsScan(schema: StructType,
         // Generate one partition per hdfs block.
         for (block <- blockList) {
           a += new HdfsPartition(index = i, offset = block.getOffset, length = block.getLength,
-                                 name = fName)
+                                 name = fName,
+                                 last = (i == blockList.size - 1))
           i += 1
         }
       }
@@ -140,7 +141,8 @@ class HdfsScan(schema: StructType,
                                  length = parquetBlock.getCompressedSize,
                                  name = fName,
                                  rows = parquetBlock.getRowCount,
-                                 store.getModifiedTime(fName))
+                                 store.getModifiedTime(fName),
+                                 last = (i == parquetBlocks.size - 1))
         }
       }
     }

@@ -27,13 +27,15 @@ import org.apache.spark.sql.connector.read.InputPartition
  * @param length the total bytes in the file
  * @param name the full path of the file
  * @param modifiedTime the last modification time of the file.
+ * @param last true if it is the last partition.
  */
 class HdfsPartition(var index: Int,
                     var offset: Long = 0,
                     var length: Long = 0,
                     var name: String = "",
                     var rows: Long = 0,
-                    var modifiedTime: Long = 0)
+                    var modifiedTime: Long = 0,
+                    var last: Boolean = false)
   extends Partition with InputPartition with PushdownPartition {
 
   override def toString() : String = {
