@@ -388,8 +388,6 @@ object HdfsStore {
       }
       fileStatusArray
   }
-  // Holds the number of partitions in a map
-  protected val filePartitionsMap = scala.collection.mutable.Map[String, Int]()
   /**
    * Fetches the number of partitions for a given file.
    * This is the number of partitions which NDP wants the
@@ -399,22 +397,9 @@ object HdfsStore {
    * @return number of partitions according to NDP.
    */
   def getFilePartitions(filePath: String, processorId: String): Int = {
-    var partitions = 0
-    /* The number of partitions is cached in filePartitionsMap.
-     * This means that for subsequent calls we cna use the cached values.
-     */
-    for ((f, v) <- filePartitionsMap) {
-      if (filePath.contains(f)) {
-        partitions = filePartitionsMap(f)
-        logger.info(s"found {} partitions for file {}", partitions, filePath)
-      }
-    }
-    if (partitions == 0) {
-      val status = HdfsStore.getInfo(filePath, processorId)
-      partitions = status("partitions").toInt
-      filePartitionsMap(filePath) = partitions
-      logger.info(s"${status("partitions")} partitions for file ${filePath}")
-    }
+    val status = HdfsStore.getInfo(filePath, processorId)
+    val partitions = status("partitions").toInt
+    logger.info(s"${status("partitions")} partitions for file ${filePath}")
     partitions
   }
 
@@ -425,13 +410,14 @@ object HdfsStore {
    * can be immediately returned.
    * @param options
    */
-  def sendReadAhead(options: HashMap[String, String]): Unit = {
+  def sendReadAhead(options: HashMap[String, String],
+                    procName: String = "LambdaReadAhead"): Unit = {
     val path = options.get("path")
     val conf = configuration
     val fs: FileSystem = getFileSystem(path, conf)
     val files = HdfsStore.getFileList(path, fs)
     for (file <- files) {
-      sendReadAhead(options, file)
+      sendReadAhead(options, file, procName)
     }
   }
 
@@ -439,17 +425,18 @@ object HdfsStore {
    * @param options all parameters for the request, including
    *                path of the file, json filters, and json aggregate
    */
-  def sendReadAhead(options: HashMap[String, String], filePath: String): Unit = {
+  def sendReadAhead(options: HashMap[String, String], filePath: String,
+                    processorName: String): Unit = {
 
     val readParam = {
       options.get("format") match {
         case "parquet" =>
           val dag = options.getOrDefault("ndpdag", "").replace("FILE_TAG", filePath)
           val processorId = options.getOrDefault("processorid", "")
-          val lambdaXml = new ProcessorRequest("LambdaReadAhead",
-                                                      processorId,
-                                                      rowGroup = 0,
-                                                      dag).toXml
+          val lambdaXml = new ProcessorRequest(processorName,
+                                               processorId,
+                                               rowGroup = 0,
+                                               dag).toXml
           logger.info(lambdaXml.replace("\n", "").replace("  ", ""))
           lambdaXml
       }

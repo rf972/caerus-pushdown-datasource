@@ -295,7 +295,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     val path = opt.get("path").replaceFirst("hdfs://.*:9000/", "ndphdfs://dikehdfs/")
 
     val compression = opt.getOrDefault("ndpcompression", "None")
-    val compLevel = opt.getOrDefault("ndpcomplevel", "-100")
+    val compLevel = opt.getOrDefault("ndpcomplevel", "2")
     val test = opt.getOrDefault("currenttest", "Unknown Test")
     opt.put("path", path)
     opt.put("format", "parquet")
@@ -360,6 +360,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     }
     val dag = ProcessorRequestDag("FILE_TAG", nodeArray).dagString
     opt.put("ndpdag", dag)
+    opt.put("ndpReadAhead", "LambdaReadAhead")
     readAheadMap(processorId) = opt
     val hdfsScanObject = new HdfsOpScan(references.toStructType, opt)
     val scanRelation = DataSourceV2ScanRelation(ndpRel.get, hdfsScanObject, references)
@@ -375,7 +376,11 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
       }
     }
     if (withFilter.output != project || filters.length == 0) {
-      Project(project, withFilter)
+      if (project != scanRelation.output) {
+        Project(project, withFilter)
+      } else {
+        scanRelation
+      }
     } else {
       withFilter
     }
@@ -456,12 +461,11 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
                             aggregates.asInstanceOf[Seq[AggregateExpression]],
                             test)
     opt.put("ndpjsonaggregate", aggregateJson)
-    // Once we know what the file is, we will replace the FILE_TAG
-    // with the actual file (for all the files we need to process).
-    val dag = ProcessorRequestDag("FILE_TAG",
-                                  Array[String](opt.get("ndpjsonfilters"),
-                                                aggregateJson)).dagString
+    val nodes = Array(opt.getOrDefault("ndpjsonfilters", ""),
+                      aggregateJson).filter(x => x != "")
+    val dag = ProcessorRequestDag(nodes = nodes).dagString
     opt.put("ndpdag", dag)
+    opt.put("ndpReadAhead", "LambdaReadAhead")
     readAheadMap(opt.get("processorid")) = opt
     val hdfsScanObject = new HdfsOpScan(output.toStructType, opt)
     val scanRelation = DataSourceV2ScanRelation(relationArgs._1,
@@ -500,8 +504,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
           case HdfsOpScan(schema, opts) =>
             opts
         }
-        (!relationScan.isInstanceOf[HdfsOpScan] &&
-         !scanOpts.containsKey("ndpjsonaggregate") &&
+        (!scanOpts.containsKey("ndpjsonaggregate") &&
          !scanOpts.containsKey("ndpdisableaggregatepush"))
       case _ => false
     }
@@ -610,14 +613,11 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
       case EitherLeft(l) => Seq[AttributeReference]()
     }
     val aggScan = childAgg match {
-      case DataSourceV2ScanRelation(relation, scan, output) =>
-        scan
+      case DataSourceV2ScanRelation(relation, scan, output) => scan
     }
     val aggOpts = aggScan match {
-      case ParquetScan(_, _, _, dataSchema, _, _, _, opts, _, _) =>
-        opts
-      case HdfsOpScan(schema, opts) =>
-        opts
+      case ParquetScan(_, _, _, dataSchema, _, _, _, opts, _, _) => opts
+      case HdfsOpScan(schema, opts) => opts
     }
     val filterReferencesEither = getFilterAttributes(filtersTop)
     val filterReferences = filterReferencesEither match {
@@ -668,12 +668,41 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     // Once we know what the file is, we will replace the FILE_TAG
     // with the actual file (for all the files we need to process).
     val aggregateJson = PushdownJson.getAggregateJson(groupingExpressions,
-                                                aggregates.asInstanceOf[Seq[AggregateExpression]],
-                                                test)
-    val nodeArray = Array[String](opt.get("ndpjsonfilters"), aggregateJson,
-      projectTopJson) // filtersTopJson,
-    val dag = ProcessorRequestDag("FILE_TAG", nodeArray).dagString
+      aggregates.asInstanceOf[Seq[AggregateExpression]],
+      test)
+    // Generate a top aggregate, which does an aggregation over the aggregation
+    // This step is required by NDP in order to create a barrier between the
+    // trees that get individual partitions and the aggregate across all
+    // partitions.
+    val topAggregateJson = PushdownJson.getAggregateJson(groupingExpressions,
+      aggregates.asInstanceOf[Seq[AggregateExpression]],
+      test,
+      topAggregate = true)
+
+    // We need to handle aliases in the filters
+    // gather all the aliases found in the aggregates.
+    val aliasesMap = aggregateExpressions.flatMap(x => x match {
+      case a @ Alias(child, name) =>
+        PushdownJson.getAggregateName(child.asInstanceOf[AggregateExpression],
+                                      topAggregate = true) match {
+          case Some(aggString) => Some(name, aggString)
+          case _ => None
+        }
+      case _ => None
+    }).toMap
+    // Apply this set of aliases to our Json of the filter Top.
+    val aliasedFiltersTop = aliasesMap.foldLeft(filtersTopJson)(
+      (x, y) => x.replaceAllLiterally(y._1, y._2))
+
+    // Apply this set of aliases to our Json of the project Top.
+    val aliasedProjectTop = aliasesMap.foldLeft(projectTopJson)(
+      (x, y) => x.replaceAllLiterally(y._1, y._2))
+    val nodeArray = Array[String](opt.getOrDefault("ndpjsonfilters", ""),
+      aggregateJson, topAggregateJson,
+      aliasedFiltersTop, aliasedProjectTop).filter(x => x != "")
+    val dag = ProcessorRequestDag(nodes = nodeArray).dagString
     opt.put("ndpdag", dag)
+    opt.put("ndpReadAhead", "LambdaTotal")
     readAheadMap(processorId) = opt
     val hdfsScanObject = new HdfsOpScan(references.toStructType, opt)
     val scanRelation = DataSourceV2ScanRelation(ndpRel.get, hdfsScanObject, references)
@@ -711,7 +740,11 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
           case s@ScanOperation(project,
                                filters,
                                child: DataSourceV2ScanRelation)
-            if filters.isEmpty => true
+            if filters.isEmpty =>
+             childAgg match {
+              case DataSourceV2ScanRelation(relation, scan, output) => true
+              case _ => false
+              }
           case other =>
             false
         }
@@ -757,7 +790,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     // val after = pushFilterProject(inputPlan, readAheadMap)
     for ((k, v) <- readAheadMap) {
       logger.info(s"readAhead appId ${k}")
-      HdfsStore.sendReadAhead(v)
+      HdfsStore.sendReadAhead(v, procName = v.get("ndpReadAhead"))
     }
     after
   }

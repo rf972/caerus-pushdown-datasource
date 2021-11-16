@@ -48,8 +48,7 @@ import org.apache.spark.sql.connector.read.InputPartition
                            nodes: Array[String],
                            test: String = "",
                            compressionType: String = "ZSTD",
-                           compressionLevel: String = "-100") {
-
+                           compressionLevel: String = "2") {
     private val logger = LoggerFactory.getLogger(getClass)
     def dagString: String = {
         val dagBuilder = Json.createObjectBuilder()
@@ -90,8 +89,8 @@ import org.apache.spark.sql.connector.read.InputPartition
 
 object ProcessorRequestDag {
 
-  def apply(fileName: String,
-            nodes: Array[String],
+  def apply(fileName: String = ProcessorRequestDag.fileTag,
+            nodes: Array[String] = Array[String](),
             test: String = "",
             compressionType: String = "ZSTD",
             compressionLevel: String = "-100"): ProcessorRequestDag =

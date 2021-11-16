@@ -297,12 +297,29 @@ object PushdownJson {
       // val indented = (new JSONObject(jsonString)).toString(4)
       jsonString
     }
+    def getAggregateName(aggregateExpression: AggregateExpression,
+                         topAggregate: Boolean = false): Option[String] = {
+      aggregateExpression.aggregateFunction match {
+        case Min(PushableColumnWithoutNestedColumn(name)) =>
+          Some(s"min($name)")
+        case Max(PushableColumnWithoutNestedColumn(name)) =>
+          Some(s"max($name)")
+        case sum @ Sum(PushableColumnWithoutNestedColumn(name)) =>
+          if (topAggregate) Some(s"sum(sum($name))")
+          else Some(s"sum($name)")
+        case _ => None
+      }
+    }
     def getAggregateJson(groupingExpressions: Seq[Expression],
                          aggregateExpressions: Seq[AggregateExpression],
-                         test: String): String = {
-      val filterNodeBuilder = Json.createObjectBuilder()
-      filterNodeBuilder.add("Name", test)
-      filterNodeBuilder.add("Type", "_AGGREGATE")
+                         test: String,
+                         topAggregate: Boolean = false): String = {
+      val aggNodeBuilder = Json.createObjectBuilder()
+      aggNodeBuilder.add("Name", test)
+      aggNodeBuilder.add("Type", "_AGGREGATE")
+
+      if (topAggregate) aggNodeBuilder.add("Barrier", "1")
+
       val groupingArrayBuilder = Json.createArrayBuilder()
       for (f <- groupingExpressions) {
         val j = buildGroupingExpressionJson(f)
@@ -310,19 +327,19 @@ object PushdownJson {
           groupingArrayBuilder.add(j.get)
         }
       }
-      filterNodeBuilder.add("GroupingArray", groupingArrayBuilder)
+      aggNodeBuilder.add("GroupingArray", groupingArrayBuilder)
 
       val aggregateArrayBuilder = Json.createArrayBuilder()
       for (f <- aggregateExpressions) {
-          val j = buildAggregateExpressionJson(f)
+          val j = buildAggregateExpressionJson(f, topAggregate)
           if (j.isDefined) {
             aggregateArrayBuilder.add(j.get)
           }
       }
-      filterNodeBuilder.add("AggregateArray", aggregateArrayBuilder)
+      aggNodeBuilder.add("AggregateArray", aggregateArrayBuilder)
       val stringWriter = new StringWriter()
       val writer = Json.createWriter(stringWriter)
-      writer.writeObject(filterNodeBuilder.build())
+      writer.writeObject(aggNodeBuilder.build())
       writer.close()
       val jsonString = stringWriter.getBuffer().toString()
       // val indented = (new JSONObject(jsonString)).toString(4)
@@ -385,7 +402,8 @@ object PushdownJson {
         s"(${getAggregateString(left)} - ${getAggregateString(right)})"
     }
   }
-  def buildAggregateExpressionJson(aggregate: AggregateExpression): Option[JsonObject] = {
+  def buildAggregateExpressionJson(aggregate: AggregateExpression,
+                                   topAggregate: Boolean = false): Option[JsonObject] = {
     def buildAggregate(name: String, value: JsonObject): JsonObject = {
       val aggNodeBuilder = Json.createObjectBuilder()
       aggNodeBuilder.add("Aggregate", name)
@@ -441,7 +459,11 @@ object PushdownJson {
             case _ => None
           }
         case sum @ Sum(PushableColumnWithoutNestedColumn(name)) =>
-          Some(buildAggregate("sum", buildGeneric("ColumnReference", name)))
+          if (topAggregate) {
+            Some(buildAggregate("sum", buildGeneric("ColumnReference", s"sum($name)")))
+          } else {
+            Some(buildAggregate("sum", buildGeneric("ColumnReference", name)))
+          }
         case sum @ Sum(child: Expression) =>
           Some(buildAggregate("sum", buildAggExpr(child)))
         case _ => None

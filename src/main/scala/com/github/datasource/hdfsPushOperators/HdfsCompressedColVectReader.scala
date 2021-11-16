@@ -75,7 +75,7 @@ class HdfsCompressedColVectReader(schema: StructType,
       val nCols: Integer = nColsLong.toInt
       // logger.info("nCols : " + String.valueOf(nCols))
       val dataTypes = new Array[Int](nCols)
-      for (i <- 0 to nCols - 1) {
+      for (i <- 0 until nCols) {
         dataTypes(i) = (stream.readLong()).toInt
         // logger.info(String.valueOf(i) + " : " + String.valueOf(dataTypes(i)))
       }
