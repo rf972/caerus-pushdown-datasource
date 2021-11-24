@@ -34,8 +34,7 @@ import org.json._
 import org.slf4j.LoggerFactory
 
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression}
-import org.apache.spark.sql.catalyst.expressions.aggregate.{Count, Max, Min, Sum}
+import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Count, Max, Min, Sum}
 import org.apache.spark.sql.execution.datasources.PushableColumnAndNestedColumn
 import org.apache.spark.sql.execution.datasources.PushableColumnWithoutNestedColumn
 import org.apache.spark.sql.types._
@@ -131,7 +130,7 @@ object PushdownJson {
         buildGeneric("ColumnReference", name)
       case Literal(value, dataType) =>
         buildGeneric("Literal", value.toString)
-      case Cast(expression, dataType, timeZoneId) =>
+      case Cast(expression, dataType, timeZoneId, _) =>
         buildFiltersJson(expression)
       case other@_ => logger.warn("unknown filter:" + other)
          buildUnknown(other)
@@ -213,7 +212,7 @@ object PushdownJson {
         true
       case Literal(value, dataType) =>
         true
-      case Cast(expression, dataType, timeZoneId) =>
+      case Cast(expression, dataType, timeZoneId, _) =>
         true
       case other@_ => logger.warn("unknown filter:" + other)
         /* Reached an unknown node, return validation failed. */
@@ -250,7 +249,7 @@ object PushdownJson {
         true
       case Literal(value, dataType) =>
         true
-      case Cast(expression, dataType, timeZoneId) =>
+      case Cast(expression, dataType, timeZoneId, _) =>
         true
       case other@_ => logger.warn("unknown filter:" + other)
         /* Reached an unknown node, return validation failed. */
@@ -304,7 +303,7 @@ object PushdownJson {
           Some(s"min($name)")
         case Max(PushableColumnWithoutNestedColumn(name)) =>
           Some(s"max($name)")
-        case sum @ Sum(PushableColumnWithoutNestedColumn(name)) =>
+        case sum @ Sum(PushableColumnWithoutNestedColumn(name), _) =>
           if (topAggregate) Some(s"sum(sum($name))")
           else Some(s"sum($name)")
         case _ => None
@@ -377,9 +376,9 @@ object PushdownJson {
               schema = schema.add(StructField(s"count(${name})", LongType))
             case _ => None
           }
-        case sum @ Sum(PushableColumnWithoutNestedColumn(name)) =>
+        case sum @ Sum(PushableColumnWithoutNestedColumn(name), _) =>
           schema = schema.add(StructField(s"sum(${name})", sum.dataType))
-        case sum @ Sum(child: Expression) =>
+        case sum @ Sum(child: Expression, _) =>
           schema = schema.add(StructField(s"sum(${getAggregateString(child)})", sum.dataType))
         case _ => None
       }
@@ -458,13 +457,13 @@ object PushdownJson {
                               isDistinct = aggregate.isDistinct))
             case _ => None
           }
-        case sum @ Sum(PushableColumnWithoutNestedColumn(name)) =>
+        case sum @ Sum(PushableColumnWithoutNestedColumn(name), _) =>
           if (topAggregate) {
             Some(buildAggregate("sum", buildGeneric("ColumnReference", s"sum($name)")))
           } else {
             Some(buildAggregate("sum", buildGeneric("ColumnReference", name)))
           }
-        case sum @ Sum(child: Expression) =>
+        case sum @ Sum(child: Expression, _) =>
           Some(buildAggregate("sum", buildAggExpr(child)))
         case _ => None
       }

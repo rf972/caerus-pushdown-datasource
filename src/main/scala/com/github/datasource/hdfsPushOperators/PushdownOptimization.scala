@@ -54,7 +54,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
       case a @ Alias(child, name) =>
         new Alias(mapAttribute(child, newProject).asInstanceOf[Expression],
                   name)(a.exprId, a.qualifier, a.explicitMetadata, a.nonInheritableMetadataKeys)
-      case Cast(expression, dataType, timeZoneId) =>
+      case Cast(expression, dataType, timeZoneId, _) =>
         new Cast(mapAttribute(expression, newProject).asInstanceOf[NamedExpression],
                  dataType, timeZoneId)
       case AttributeReference(name, dataType, nullable, meta) =>
@@ -88,7 +88,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     origExpression match {
       case a @ Alias(child, name) =>
         getAttributeValues(child)
-      case Cast(expression, dataType, timeZoneId) =>
+      case Cast(expression, dataType, timeZoneId, _) =>
         getAttributeValues(expression)
       case AttributeReference(name, dataType, nullable, meta) =>
         (name, dataType.toString)
@@ -118,7 +118,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     origExpression match {
       case Alias(child, name) =>
         getAttribute(child)
-      case Cast(expression, dataType, timeZoneId) =>
+      case Cast(expression, dataType, timeZoneId, _) =>
         getAttribute(expression)
       case attrib @ AttributeReference(name, dataType, nullable, meta) =>
         EitherRight(attrib)
@@ -185,7 +185,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
     filter match {
       case attrib @ AttributeReference(name, dataType, nullable, meta) =>
         Seq(attrib)
-      case Cast(expression, dataType, timeZoneId) =>
+      case Cast(expression, dataType, timeZoneId, _) =>
         getFilterExpressionAttributes(expression)
       case Or(left, right) => getFilterExpressionAttributes(left) ++
                               getFilterExpressionAttributes(right)
@@ -555,7 +555,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
           case Max(child: Expression) => aggValidateExpression(child)
           case count: Count if count.children.length == 1 =>
             aggValidateExpression(count.children.head)
-          case sum @ Sum(child: Expression) => aggValidateExpression(child)
+          case sum @ Sum(child: Expression, _) => aggValidateExpression(child)
           case _ => false
         }
       } else {
@@ -758,7 +758,7 @@ object PushdownOptimizationRule extends Rule[LogicalPlan] {
       case s@ScanOperation(project,
                            filters,
                            aggregate: Aggregate)
-        if (canHandleProjFilterOverAgg(project, filters, aggregate)) =>
+        if (false && canHandleProjFilterOverAgg(project, filters, aggregate)) =>
           transformProjFiltAggregate(project, filters, aggregate, readAheadMap)
       case aggNode @ Aggregate(groupingExpressions, resultExpressions, childAgg)
         if (aggExpressionIsValid(groupingExpressions, resultExpressions) &&
