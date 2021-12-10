@@ -25,6 +25,7 @@ import java.io.InputStreamReader
 import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.util
+import java.util.HashMap
 import java.util.Locale
 
 import scala.collection.JavaConverters._
@@ -207,16 +208,14 @@ class HdfsStore(options: java.util.Map[String, String],
     val readParam = {
       options.get("format") match {
         case "parquet" =>
-          val columnList = options.getOrDefault("ndpprojectcolumns", "").split(",")
-          val fileName = partition.name.replace("ndphdfs://dikehdfs:9860", "")
-          val compression = options.getOrDefault("ndpcompression", "None")
-          val compLevel = options.getOrDefault("ndpcomplevel", "-100")
-          val test = options.getOrDefault("currenttest", "Unknown Test")
-          val filters = options.getOrDefault("ndpjsonfilters", "")
-          val lambdaXml = new ProcessorRequestLambda(partition.modifiedTime, partition.index,
-                                                     columnList, fileName,
-                                                     compression, compLevel,
-                                                     filters, test).toXml
+          // Get the dag with this partitions's file.
+          val dag = ProcessorRequestDag.dagString(options.getOrDefault("ndpdag", ""),
+                                                  partition.name)
+          val processorId = options.getOrDefault("processorid", "")
+          val lambdaXml = new ProcessorRequest("Lambda",
+                                               processorId,
+                                               partition.index,
+                                               dag).toXml
           logger.info(lambdaXml.replace("\n", "").replace("  ", ""))
           lambdaXml
       }
@@ -236,9 +235,6 @@ class HdfsStore(options: java.util.Map[String, String],
 object HdfsStore {
 
   protected val logger = LoggerFactory.getLogger(getClass)
-  private val sparkSession: SparkSession = SparkSession
-      .builder()
-      .getOrCreate()
 
   /** Returns true if pushdown is supported by this flavor of
    *  filesystem represented by a string of "filesystem://filename".
@@ -328,7 +324,7 @@ object HdfsStore {
     fileArray.toSeq
   }
   private val configuration: Configuration = {
-    val conf = sparkSession.sessionState.newHadoopConf()
+    val conf = new Configuration()
     // conf.set("dfs.datanode.drop.cache.behind.reads", "true")
     // conf.set("dfs.client.cache.readahead", "0")
     conf.set("fs.ndphdfs.impl", classOf[org.dike.hdfs.NdpHdfsFileSystem].getName)
@@ -391,5 +387,98 @@ object HdfsStore {
         statusArray.toSeq
       }
       fileStatusArray
+  }
+  /**
+   * Fetches the number of partitions for a given file.
+   * This is the number of partitions which NDP wants the
+   * client to use.
+   * @param filePath
+   * @param processorId
+   * @return number of partitions according to NDP.
+   */
+  def getFilePartitions(filePath: String, processorId: String): Int = {
+    val status = HdfsStore.getInfo(filePath, processorId)
+    val partitions = status("partitions").toInt
+    logger.info(s"${status("partitions")} partitions for file ${filePath}")
+    partitions
+  }
+
+  /**
+   * Send a read ahead operation to NDP.
+   * This will begin to read and process the query on a file,
+   * so that when the actual read query arrives, the results
+   * can be immediately returned.
+   * @param options
+   */
+  def sendReadAhead(options: HashMap[String, String],
+                    procName: String = "LambdaReadAhead"): Unit = {
+    val path = options.get("path")
+    val conf = configuration
+    val fs: FileSystem = getFileSystem(path, conf)
+    val files = HdfsStore.getFileList(path, fs)
+    for (file <- files) {
+      sendReadAhead(options, file, procName)
+    }
+  }
+
+  /** Sends a read ahead operation to NDP Server
+   * @param options all parameters for the request, including
+   *                path of the file, json filters, and json aggregate
+   */
+  def sendReadAhead(options: HashMap[String, String], filePath: String,
+                    processorName: String): Unit = {
+
+    val readParam = {
+      options.get("format") match {
+        case "parquet" =>
+          val dag = options.getOrDefault("ndpdag", "").replace("FILE_TAG", filePath)
+          val processorId = options.getOrDefault("processorid", "")
+          val lambdaXml = new ProcessorRequest(processorName,
+                                               processorId,
+                                               rowGroup = 0,
+                                               dag).toXml
+          logger.info(lambdaXml.replace("\n", "").replace("  ", ""))
+          lambdaXml
+      }
+    }
+    val fs: FileSystem = getFileSystem(filePath)
+    val fsc = fs.asInstanceOf[NdpHdfsFileSystem]
+    val inFile = getFilePath(filePath)
+    val inStrm = fsc.open(new Path(inFile), 4096, readParam).asInstanceOf[FSDataInputStream]
+    val br = new BufferedReader(new InputStreamReader(inStrm, StandardCharsets.UTF_8), 8192)
+    // logger.info("reading status from read ahead")
+    val line: String = br.readLine()
+    logger.info(s"status from read ahead $line")
+  }
+  def sendClearAll(filePath: String): Unit = {
+    val readParam = new ProcessorRequest("LambdaClearAll").toXml
+    logger.info(readParam.replace("\n", "").replace("  ", ""))
+    // logger.info(s"filePath is: $filePath")
+    val line = sendParam(readParam, filePath)
+    logger.info(s"status from clear all $line")
+  }
+  def getInfo(filePath: String, processorId: String): Map[String, String] = {
+    val readParam = new ProcessorRequest("LambdaInfo",
+                                                 processorId).toXml
+    logger.info(readParam.replace("\n", "").replace("  ", ""))
+    val line = sendParam(readParam, filePath)
+    logger.info(s"status from get info $line")
+    val partitions = line.split('=')(1).replace(" ", "")
+    val status = Map("partitions" -> partitions)
+    status
+  }
+
+  private def sendParam(readParam: String, filePath: String): String = {
+    val fs: FileSystem = getFileSystem(filePath)
+    val fsc = fs.asInstanceOf[NdpHdfsFileSystem]
+    val inFile = getFilePath(filePath)
+    val inStrm = fsc.open(new Path(inFile), 4096, readParam).asInstanceOf[FSDataInputStream]
+    val br = new BufferedReader(new InputStreamReader(inStrm, StandardCharsets.UTF_8), 8192)
+    val line: String = br.readLine()
+    line
+  }
+  def main(args: Array[String]): Unit = {
+    logger.info(s"arg was: {$args(0)}")
+    getInfo(args(0), "0")
   }
 }

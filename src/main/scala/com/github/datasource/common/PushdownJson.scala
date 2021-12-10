@@ -34,6 +34,10 @@ import org.json._
 import org.slf4j.LoggerFactory
 
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Count, Max, Min, Sum}
+import org.apache.spark.sql.execution.datasources.PushableColumnAndNestedColumn
+import org.apache.spark.sql.execution.datasources.PushableColumnWithoutNestedColumn
+import org.apache.spark.sql.types._
 
 object PushdownJson {
 
@@ -126,6 +130,8 @@ object PushdownJson {
         buildGeneric("ColumnReference", name)
       case Literal(value, dataType) =>
         buildGeneric("Literal", value.toString)
+      case Cast(expression, dataType, timeZoneId, _) =>
+        buildFiltersJson(expression)
       case other@_ => logger.warn("unknown filter:" + other)
          buildUnknown(other)
     }
@@ -148,8 +154,8 @@ object PushdownJson {
     writer.writeObject(filterNodeBuilder.build())
     writer.close()
     val jsonString = stringWriter.getBuffer().toString()
-    val indented = (new JSONObject(jsonString)).toString(4)
-    indented
+    // val indented = (new JSONObject(jsonString)).toString(4)
+    jsonString
   }
   def getFiltersJsonMaxDesired(filters: Seq[Expression], test: String): String = {
     val filterNodeBuilder = Json.createObjectBuilder()
@@ -206,6 +212,8 @@ object PushdownJson {
         true
       case Literal(value, dataType) =>
         true
+      case Cast(expression, dataType, timeZoneId, _) =>
+        true
       case other@_ => logger.warn("unknown filter:" + other)
         /* Reached an unknown node, return validation failed. */
         false
@@ -241,28 +249,231 @@ object PushdownJson {
         true
       case Literal(value, dataType) =>
         true
+      case Cast(expression, dataType, timeZoneId, _) =>
+        true
       case other@_ => logger.warn("unknown filter:" + other)
         /* Reached an unknown node, return validation failed. */
         false
     }
   }
-  def validateFilters(filters: Seq[Expression]): PushdownJsonStatus = {
-    var status: Boolean = true
-    var invalidCount = 0
-    var validCount = 0
-    for (f <- filters) {
-      if (validateFilterExpression(f)) {
-        validCount += 1
+    def validateFilters(filters: Seq[Expression]): PushdownJsonStatus = {
+      var status: Boolean = true
+      var invalidCount = 0
+      var validCount = 0
+      for (f <- filters) {
+        if (validateFilterExpression(f)) {
+          validCount += 1
+        } else {
+          invalidCount += 1
+        }
+      }
+      if (invalidCount == 0 && validCount > 0) {
+        PushdownJsonStatus.FullyValid
+      } else if (invalidCount > 0 && validCount > 0) {
+        PushdownJsonStatus.PartiallyValid
       } else {
-        invalidCount += 1
+        PushdownJsonStatus.Invalid
       }
     }
-    if (invalidCount == 0 && validCount > 0) {
-      PushdownJsonStatus.FullyValid
-    } else if (invalidCount > 0 && validCount > 0) {
-      PushdownJsonStatus.PartiallyValid
-    } else {
-      PushdownJsonStatus.Invalid
+    def getProjectJson(columnNames: Seq[String],
+                       test: String): String = {
+      val projectionNodeBuilder = Json.createObjectBuilder()
+      if (columnNames.length > 0) {
+        projectionNodeBuilder.add("Name", test)
+        projectionNodeBuilder.add("Type", "_PROJECTION")
+        val projectionArrayBuilder = Json.createArrayBuilder()
+
+        for (col <- columnNames) {
+          projectionArrayBuilder.add(col)
+        }
+        projectionNodeBuilder.add("ProjectionArray", projectionArrayBuilder)
+      }
+      val stringWriter = new StringWriter()
+      val writer = Json.createWriter(stringWriter)
+      writer.writeObject(projectionNodeBuilder.build())
+      writer.close()
+      val jsonString = stringWriter.getBuffer().toString()
+      // val indented = (new JSONObject(jsonString)).toString(4)
+      jsonString
     }
+    def getAggregateName(aggregateExpression: AggregateExpression,
+                         topAggregate: Boolean = false): Option[String] = {
+      aggregateExpression.aggregateFunction match {
+        case Min(PushableColumnWithoutNestedColumn(name)) =>
+          Some(s"min($name)")
+        case Max(PushableColumnWithoutNestedColumn(name)) =>
+          Some(s"max($name)")
+        case sum @ Sum(PushableColumnWithoutNestedColumn(name), _) =>
+          if (topAggregate) Some(s"sum(sum($name))")
+          else Some(s"sum($name)")
+        case _ => None
+      }
+    }
+    def getAggregateJson(groupingExpressions: Seq[Expression],
+                         aggregateExpressions: Seq[AggregateExpression],
+                         test: String,
+                         topAggregate: Boolean = false): String = {
+      val aggNodeBuilder = Json.createObjectBuilder()
+      aggNodeBuilder.add("Name", test)
+      aggNodeBuilder.add("Type", "_AGGREGATE")
+
+      if (topAggregate) aggNodeBuilder.add("Barrier", "1")
+
+      val groupingArrayBuilder = Json.createArrayBuilder()
+      for (f <- groupingExpressions) {
+        val j = buildGroupingExpressionJson(f)
+        if (j.isDefined) {
+          groupingArrayBuilder.add(j.get)
+        }
+      }
+      aggNodeBuilder.add("GroupingArray", groupingArrayBuilder)
+
+      val aggregateArrayBuilder = Json.createArrayBuilder()
+      for (f <- aggregateExpressions) {
+          val j = buildAggregateExpressionJson(f, topAggregate)
+          if (j.isDefined) {
+            aggregateArrayBuilder.add(j.get)
+          }
+      }
+      aggNodeBuilder.add("AggregateArray", aggregateArrayBuilder)
+      val stringWriter = new StringWriter()
+      val writer = Json.createWriter(stringWriter)
+      writer.writeObject(aggNodeBuilder.build())
+      writer.close()
+      val jsonString = stringWriter.getBuffer().toString()
+      // val indented = (new JSONObject(jsonString)).toString(4)
+      jsonString
+  }
+  def buildGroupingExpressionJson(e: Expression): Option[JsonObject] = {
+    e match {
+        case PushableColumnWithoutNestedColumn(name) =>
+          Some(buildGeneric("ColumnReference", name))
+        case _ => None
+    }
+  }
+
+  def getAggregateSchema(aggregates: Seq[AggregateExpression],
+                         groupingExpressions: Seq[Expression]): StructType = {
+    var schema = new StructType()
+    for (e <- groupingExpressions) {
+      e match {
+        case attrib @ AttributeReference(name, dataType, nullable, meta) =>
+          schema = schema.add(StructField(name, dataType))
+      }
+    }
+    for (a <- aggregates) {
+      a.aggregateFunction match {
+        case min @ Min(PushableColumnWithoutNestedColumn(name)) =>
+          schema = schema.add(StructField(s"min(${name})", min.dataType))
+        case max @ Max(PushableColumnWithoutNestedColumn(name)) =>
+          schema = schema.add(StructField(s"max(${name})", max.dataType))
+        case count: aggregate.Count if count.children.length == 1 =>
+          count.children.head match {
+            // SELECT COUNT(*) FROM table is translated to SELECT 1 FROM table
+            case Literal(_, _) =>
+              schema = schema.add(StructField("count(*)", LongType))
+            case PushableColumnWithoutNestedColumn(name) =>
+              schema = schema.add(StructField(s"count(${name})", LongType))
+            case _ => None
+          }
+        case sum @ Sum(PushableColumnWithoutNestedColumn(name), _) =>
+          schema = schema.add(StructField(s"sum(${name})", sum.dataType))
+        case sum @ Sum(child: Expression, _) =>
+          schema = schema.add(StructField(s"sum(${getAggregateString(child)})", sum.dataType))
+        case _ => None
+      }
+    }
+    schema
+  }
+  def getAggregateString(e: Expression): String = {
+    e match {
+      case attrib @ AttributeReference(name, dataType, nullable, meta) =>
+        name
+      case Literal(value, dataType) =>
+        value.toString
+      case mult @ Multiply(left, right, failOnError) =>
+        s"(${getAggregateString(left)} * ${getAggregateString(right)})"
+      case div @ Divide(left, right, failOnError) =>
+        s"(${getAggregateString(left)} / ${getAggregateString(right)})"
+      case add @ Add(left, right, failOnError) =>
+        s"(${getAggregateString(left)} + ${getAggregateString(right)})"
+      case subtract @ Subtract(left, right, failOnError) =>
+        s"(${getAggregateString(left)} - ${getAggregateString(right)})"
+    }
+  }
+  def buildAggregateExpressionJson(aggregate: AggregateExpression,
+                                   topAggregate: Boolean = false): Option[JsonObject] = {
+    def buildAggregate(name: String, value: JsonObject): JsonObject = {
+      val aggNodeBuilder = Json.createObjectBuilder()
+      aggNodeBuilder.add("Aggregate", name)
+      aggNodeBuilder.add("Expression", value)
+      aggNodeBuilder.build()
+    }
+    def buildAggComp(left: Expression, right: Expression, comparisonOp: String): JsonObject = {
+      val compNodeBuilder = Json.createObjectBuilder()
+      compNodeBuilder.add("Expression", comparisonOp)
+      compNodeBuilder.add("Left", buildAggExpr(left))
+      compNodeBuilder.add("Right", buildAggExpr(right))
+      compNodeBuilder.build()
+    }
+    def buildAggExpr(e: Expression) : JsonObject = {
+      e match {
+        case attrib @ AttributeReference(name, dataType, nullable, meta) =>
+          buildGeneric("ColumnReference", name)
+        case Literal(value, dataType) =>
+          buildGeneric("Literal", value.toString)
+        case mult @ Multiply(left, right, failOnError) =>
+          buildAggComp(left, right, "multiply")
+        case div @ Divide(left, right, failOnError) =>
+          buildAggComp(left, right, "divide")
+        case add @ Add(left, right, failOnError) =>
+          buildAggComp(left, right, "add")
+        case subtract @ Subtract(left, right, failOnError) =>
+          buildAggComp(left, right, "subtract")
+      }
+    }
+    def buildCount(name: String, value: JsonObject,
+                   isDistinct: Boolean = false): JsonObject = {
+      val aggNodeBuilder = Json.createObjectBuilder()
+      aggNodeBuilder.add("Aggregate", name)
+      aggNodeBuilder.add("Expression", value)
+      aggNodeBuilder.add("Distinct", if (isDistinct) { "yes" } else { "no" } )
+      aggNodeBuilder.build()
+    }
+    if (aggregate.filter.isEmpty) {
+      aggregate.aggregateFunction match {
+        case Min(PushableColumnWithoutNestedColumn(name)) =>
+          Some(buildAggregate("min", buildGeneric("ColumnReference", name)))
+        case Max(PushableColumnWithoutNestedColumn(name)) =>
+          Some(buildAggregate("max", buildGeneric("ColumnReference", name)))
+        case count: Count if count.children.length == 1 =>
+          count.children.head match {
+            // SELECT COUNT(*) FROM table is translated to SELECT 1 FROM table
+            case Literal(_, _) =>
+              Some(buildCount("count", buildGeneric("Literal", "*"),
+                              isDistinct = aggregate.isDistinct))
+            case PushableColumnWithoutNestedColumn(name) =>
+              Some(buildCount("count", buildGeneric("ColumnReference", name),
+                              isDistinct = aggregate.isDistinct))
+            case _ => None
+          }
+        case sum @ Sum(PushableColumnWithoutNestedColumn(name), _) =>
+          if (topAggregate) {
+            Some(buildAggregate("sum", buildGeneric("ColumnReference", s"sum($name)")))
+          } else {
+            Some(buildAggregate("sum", buildGeneric("ColumnReference", name)))
+          }
+        case sum @ Sum(child: Expression, _) =>
+          Some(buildAggregate("sum", buildAggExpr(child)))
+        case _ => None
+      }
+    } else {
+      None
+    }
+  }
+  def buildGeneric(name: String, value: String): JsonObject = {
+      val colRefBuilder = Json.createObjectBuilder()
+      colRefBuilder.add(name, value)
+      colRefBuilder.build()
   }
 }

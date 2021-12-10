@@ -20,13 +20,11 @@ organization := ""
 version := "0.1.0"
 scalaVersion := "2.12.10"
 
-val sparkVersion = "3.0.0"
-
 // We want to execute the tests serially.
 Global / concurrentRestrictions += Tags.limit(Tags.Test, 1)
 
 libraryDependencies ++= Seq(
-  "com.amazonaws" % "aws-java-sdk" % "1.11.1018" exclude("com.fasterxml.jackson.core", "jackson-databind"),
+  // "com.amazonaws" % "aws-java-sdk" % "1.11.1018" exclude("com.fasterxml.jackson.core", "jackson-databind"),
   "org.apache.commons" % "commons-csv" % "1.8",
   "org.apache.httpcomponents" % "httpcore" % "4.4.11",
   "org.slf4j" % "slf4j-api" % "1.7.30" % "provided",
