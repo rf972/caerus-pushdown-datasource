@@ -224,6 +224,7 @@ class HdfsStore(options: java.util.Map[String, String],
     // logger.info("open fs rowGroup " + partition.index)
     // HdfsStore.logStart(partition.index)
     val inFile = getFilePath(partition.name)
+    // logger.info(s"inFile: $inFile")
     val inStrm = fs.open(new Path(inFile), 4096, readParam).asInstanceOf[FSDataInputStream]
     new DataInputStream(new BufferedInputStream(inStrm, 128*1024))
   }

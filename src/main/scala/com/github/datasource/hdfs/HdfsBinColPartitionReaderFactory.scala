@@ -17,13 +17,19 @@
 package com.github.datasource.hdfs
 
 import java.io.DataInputStream
+import java.nio.charset.StandardCharsets
 import java.util
+import javax.xml.bind.DatatypeConverter
 
 import scala.collection.JavaConverters._
 
+import com.github.datasource.generic.GenericVectReader
+import com.github.datasource.generic.ProcessorRequestConfig
 import org.slf4j.LoggerFactory
 
 import org.apache.spark.TaskContext
+import org.apache.spark.api.python.generic.GenericPythonRunner
+import org.apache.spark.api.python.generic.PythonRunner
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
@@ -80,17 +86,16 @@ class HdfsBinColPartitionReaderFactory(schema: StructType,
     val part = partition.asInstanceOf[HdfsPartition]
     var store: HdfsStore = HdfsStoreFactory.getStore(options,
                                                      sparkSession, sharedConf.value.value)
-    val reader =
-      if (options.containsKey("ndpcompression") &&
-          (options.get("ndpcompression") == "ZSTD")) {
-        new HdfsCompressedColVectReader(schema, 256 * 1024,
-                                        part,
-                                        store.getOpStream(part).asInstanceOf[DataInputStream])
-      } else {
-        new HdfsBinColVectReader(schema, 256 * 1024,
-                                 part,
-                                 store.getOpStream(part).asInstanceOf[DataInputStream])
-      }
+    val reader = {
+      val func = DatatypeConverter.parseHexBinary(options.get("ndpPython"))
+      val config = ProcessorRequestConfig.configString(
+        options.getOrDefault("ndpConfig", ""),
+        part, System.getProperty("user.name"))
+      val runner = new GenericPythonRunner(func, config).eval
+      new GenericVectReader(schema, 256 * 1024,
+        part,
+        runner)
+    }
     logger.info("HdfsBinColVectReader created row group " + part.index)
     new HdfsBinColPartitionReader(reader, batchSize)
       // This alternate factory below is identical to the above, but

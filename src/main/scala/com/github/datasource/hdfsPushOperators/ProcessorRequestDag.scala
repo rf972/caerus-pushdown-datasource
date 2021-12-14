@@ -45,6 +45,7 @@ import org.apache.spark.sql.connector.read.InputPartition
  * @param test
  */
  class ProcessorRequestDag(fileName: String = ProcessorRequestDag.fileTag,
+                           rowGroup: String = ProcessorRequestDag.rowGroupTag,
                            nodes: Array[String],
                            test: String = "",
                            compressionType: String = "ZSTD",
@@ -58,6 +59,7 @@ import org.apache.spark.sql.connector.read.InputPartition
         inputNodeBuilder.add("Name", "InputNode")
         inputNodeBuilder.add("Type", "_INPUT")
         inputNodeBuilder.add("File", fileName)
+        inputNodeBuilder.add("RowGroup", rowGroup)
 
         val outputNodeBuilder = Json.createObjectBuilder()
         outputNodeBuilder.add("Name", "OutputNode")
@@ -92,15 +94,20 @@ object ProcessorRequestDag {
   def apply(fileName: String = ProcessorRequestDag.fileTag,
             nodes: Array[String] = Array[String](),
             test: String = "",
+            rowGroup: String = ProcessorRequestDag.rowGroupTag,
             compressionType: String = "ZSTD",
             compressionLevel: String = "-100"): ProcessorRequestDag =
-    new ProcessorRequestDag(fileName, nodes, test,
+    new ProcessorRequestDag(fileName, rowGroup, nodes, test,
                             compressionType, compressionLevel)
   // We set the file to this value in the completed DAG.
   // This allows us to replace this string with the actual file,
   // when we want to use or re-use the dag for different files.
   private val fileTag = "FILE_TAG"
+  private val rowGroupTag = "ROW_GROUP_TAG"
   def dagString(dag: String, fileName: String): String = {
     dag.replace(fileTag, fileName)
+  }
+  def dagString(dag: String, part: HdfsPartition): String = {
+    dag.replace(fileTag, part.name).replace(rowGroupTag, part.index.toString)
   }
 }
