@@ -39,6 +39,93 @@ spark.read
      .load("ndphdfs://hdfs-server/table.tbl")
 ```
 
+Using datasource with spark-shell
+==================================
+To try the datasource out with the spark-shell, first run 
+
+ ```
+./start.sh
+ ```
+ This brings up spark and the hdfs server.
+     
+Next, start spark shell with the following options.
+     
+```
+docker exec -it sparkmaster spark-shell --master local --jars /dikeHDFS/client/ndp-hdfs/target/ndp-hdfs-1.0.jar,/build/extra_jars/*,/pushdown-datasource/target/scala-2.12/pushdown-datasource_2.12-0.1.0.jar
+```
+This will start the spark shell inside of our docker for Spark.
+
+Below is an example test to paste into the spark-shell.  This test runs TPC-H Q6 with both NDP (Pushdown enabled), and Spark.
+
+```
+sc.setLogLevel("INFO")
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.catalyst.ScalaReflection
+val sqlContext = new org.apache.spark.sql.SQLContext(sc)
+import sqlContext.implicits._
+
+case class Lineitem(
+  l_orderkey: Long,
+  l_partkey: Long,
+  l_suppkey: Long,
+  l_linenumber: Long,
+  l_quantity: Double,
+  l_extendedprice: Double,
+  l_discount: Double,
+  l_tax: Double,
+  l_returnflag: String,
+  l_linestatus: String,
+  l_shipdate: String,
+  l_commitdate: String,
+  l_receiptdate: String,
+  l_shipinstruct: String,
+  l_shipmode: String,
+  l_comment: String)
+
+val schemaLineitem = ScalaReflection.schemaFor[Lineitem].dataType.asInstanceOf[StructType]  
+val dfLineitemNdp = {
+     spark.read.format("com.github.datasource")
+        .option("format", "csv")
+        .option("outputFormat", "csv")
+        .option("header", "true")
+        .schema(schemaLineitem)
+        .load("ndphdfs://dikehdfs/tpch-test-csv/lineitem.csv")}
+val dfQ06Ndp = {dfLineitemNdp.filter($"l_shipdate" >= "1994-01-01" && $"l_shipdate" < "1995-01-01" && $"l_discount" >= 0.05 && $"l_discount" <= 0.07 && $"l_quantity" < 24)
+      .agg(sum($"l_extendedprice" * $"l_discount"))}
+var startTime = System.currentTimeMillis()
+dfQ06Ndp.show()
+val endTime = System.currentTimeMillis()
+println("Processed in %.3f sec\n".format((endTime - startTime) / 1000.0))
+     
+val dfLineitemSpark = {
+     spark.read.format("csv")
+        .option("header", "true")
+        .schema(schemaLineitem)
+        .load("hdfs://dikehdfs:9000/tpch-test-csv/lineitem.csv")}
+val dfQ06Spark = {dfLineitemSpark.filter($"l_shipdate" >= "1994-01-01" && $"l_shipdate" < "1995-01-01" && $"l_discount" >= 0.05 && $"l_discount" <= 0.07 && $"l_quantity" < 24)
+      .agg(sum($"l_extendedprice" * $"l_discount"))}
+var startTime = System.currentTimeMillis()
+dfQ06Spark.show()
+val endTime = System.currentTimeMillis()
+println("Processed in %.3f sec\n".format((endTime - startTime) / 1000.0))
+```     
+
+The first line enables tracing, which allows us to see pushdown occuring in the traces.
+
+```     
+21/11/15 18:38:14 INFO V2ScanRelationPushDown: 
+Pushing operators to class com.github.datasource.PushdownBatchTable
+Pushed Filters: IsNotNull(l_shipdate), GreaterThanOrEqual(l_shipdate,1994-01-01), LessThan(l_shipdate,1995-01-01), GreaterThanOrEqual(l_discount,0.05), LessThanOrEqual(l_discount,0.07), LessThan(l_quantity,24.0)
+Post-Scan Filters: 
+         
+21/11/15 18:38:14 INFO PushdownScanBuilder: pruneColumns StructType(StructField(l_extendedprice,DoubleType,false), StructField(l_discount,DoubleType,false))
+21/11/15 18:38:15 INFO V2ScanRelationPushDown: 
+Output: l_extendedprice#5, l_discount#6
+21/11/15 18:38:16 INFO HdfsStore: SQL Query (readable): SELECT l_extendedprice,l_discount FROM S3Object WHERE l_shipdate IS NOT NULL AND l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01' AND l_discount >= 0.05 AND l_discount <= 0.07 AND l_quantity < 24.0     
+```
+     
+The final trace above shows that pushdown is occuring for filter and project.
+     
 Supported Protocols
 ====================
 The datasource supports either S3 or HDFS.
