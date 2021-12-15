@@ -45,7 +45,8 @@ import org.apache.spark.sql.connector.read.InputPartition
 class ProcessorRequestConfig(query: String,
                              url: String = ProcessorRequestConfig.fileTag,
                              rowGroup: String = ProcessorRequestConfig.rowGroupTag,
-                             useNdp: String = "True") {
+                             useNdp: String = "False",
+                             verbose: String = "True") {
   private val logger = LoggerFactory.getLogger(getClass)
   def configString: String = {
     val configBuilder = Json.createObjectBuilder()
@@ -53,6 +54,7 @@ class ProcessorRequestConfig(query: String,
     configBuilder.add("query", query)
     configBuilder.add("row_group", rowGroup)
     configBuilder.add("use_ndp", useNdp)
+    configBuilder.add("verbose", verbose)
 
     // For now we will assume simple pipe with ordered connections
     val config = configBuilder.build()

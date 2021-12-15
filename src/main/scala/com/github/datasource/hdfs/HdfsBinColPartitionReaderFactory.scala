@@ -16,33 +16,23 @@
  */
 package com.github.datasource.hdfs
 
-import java.io.DataInputStream
-import java.nio.charset.StandardCharsets
 import java.util
 import javax.xml.bind.DatatypeConverter
-
-import scala.collection.JavaConverters._
 
 import com.github.datasource.generic.GenericVectReader
 import com.github.datasource.generic.ProcessorRequestConfig
 import org.slf4j.LoggerFactory
 
-import org.apache.spark.TaskContext
 import org.apache.spark.api.python.generic.GenericPythonRunner
-import org.apache.spark.api.python.generic.PythonRunner
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.connector.read._
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.internal.SQLConf.LegacyBehaviorPolicy
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarBatch
-import org.apache.spark.sql.vectorized.ColumnVector
-import org.apache.spark.unsafe.types.UTF8String
-import org.apache.spark.util.SerializableConfiguration
 
 /** Creates a factory for creating HdfsPartitionReader objects,
  *  for parquet files to be read using ColumnarBatches,
@@ -84,8 +74,6 @@ class HdfsBinColPartitionReaderFactory(schema: StructType,
 
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
     val part = partition.asInstanceOf[HdfsPartition]
-    var store: HdfsStore = HdfsStoreFactory.getStore(options,
-                                                     sparkSession, sharedConf.value.value)
     val reader = {
       val func = DatatypeConverter.parseHexBinary(options.get("ndpPython"))
       val config = ProcessorRequestConfig.configString(

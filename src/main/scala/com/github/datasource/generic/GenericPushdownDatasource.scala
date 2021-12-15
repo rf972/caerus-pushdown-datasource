@@ -21,12 +21,6 @@ import java.util.HashMap
 
 import scala.collection.JavaConverters._
 
-import com.github.datasource.hdfs.{HdfsOpScan, HdfsStore}
-import com.github.datasource.hdfs.PushdownOptimizationRule
-import org.apache.commons.lang3.exception.ExceptionUtils
-import org.apache.hadoop.fs.FileStatus
-import org.apache.hadoop.fs.FileSystem
-import org.apache.hadoop.fs.Path
 import org.slf4j.LoggerFactory
 
 import org.apache.spark.sql.SparkSession
@@ -34,8 +28,6 @@ import org.apache.spark.sql.connector.catalog.{SessionConfigSupport, SupportsRea
   Table, TableCapability, TableProvider}
 import org.apache.spark.sql.connector.expressions._
 import org.apache.spark.sql.connector.read._
-import org.apache.spark.sql.execution.datasources.parquet.ParquetUtils
-import org.apache.spark.sql.sources._
 import org.apache.spark.sql.sources.DataSourceRegister
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
@@ -62,7 +54,7 @@ class GenericPushdownDatasource extends TableProvider
        */
       val file = NdpApi.extractFilename(options.get("path"))
       val server = NdpApi.extractServer(options.get("path"))
-      logger.info("getting schema for: ${server}/${file}")
+      logger.info(s"getting schema for: ${server}/${file}")
       NdpApi.getSchema(file, server)
     } else {
       /* Other types like CSV require a user-supplied schema */

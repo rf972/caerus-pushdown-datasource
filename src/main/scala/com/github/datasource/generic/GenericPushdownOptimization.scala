@@ -23,12 +23,11 @@ import scala.collection.mutable
 import scala.util.{Either, Left => EitherLeft, Right => EitherRight}
 
 import com.github.datasource.common.{PushdownJson, PushdownJsonStatus, PushdownSQL}
-import com.github.datasource.hdfs.{ProcessorRequestDag}
-import org.apache.commons.lang3.exception.ExceptionUtils
 import org.json._
 import org.slf4j.LoggerFactory
 import sys.process._
 
+import org.apache.spark.SparkFiles
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
@@ -464,8 +463,8 @@ object GenericPushdownOptimizationRule extends Rule[LogicalPlan] {
     opt.put("ndpjsonaggregate", aggregateJson)
     val nodes = Array(opt.getOrDefault("ndpjsonfilters", ""),
       aggregateJson).filter(x => x != "")
-    val dag = ProcessorRequestDag(nodes = nodes).dagString
-    opt.put("ndpdag", dag)
+    // val dag = ProcessorRequestDag(nodes = nodes).dagString
+    // opt.put("ndpdag", dag)
     val hdfsScanObject = new GenericPushdownScan(output.toStructType, opt)
     val scanRelation = DataSourceV2ScanRelation(relationArgs._1,
       hdfsScanObject, output)
@@ -697,8 +696,8 @@ object GenericPushdownOptimizationRule extends Rule[LogicalPlan] {
     val nodeArray = Array[String](opt.getOrDefault("ndpjsonfilters", ""),
       aggregateJson, topAggregateJson,
       aliasedFiltersTop, aliasedProjectTop).filter(x => x != "")
-    val dag = ProcessorRequestDag(nodes = nodeArray).dagString
-    opt.put("ndpdag", dag)
+    // val dag = ProcessorRequestDag(nodes = nodeArray).dagString
+    // opt.put("ndpdag", dag)
     val hdfsScanObject = new GenericPushdownScan(references.toStructType, opt)
     val scanRelation = DataSourceV2ScanRelation(ndpRel.get, hdfsScanObject, references)
     val filterCondition = filtersTop.reduceLeftOption(And)
@@ -783,9 +782,11 @@ object GenericPushdownOptimizationRule extends Rule[LogicalPlan] {
     after
   }
   def getNdpPythonString(): String = {
+    val rootPath = SparkFiles.getRootDirectory() + "/pydike_venv"
     val pythonPath = "/pyNdp:/build/spark-3.2.0/python"
-    val pythonExec = "/build/spark-3.2.0/pyspark_venv/bin/python"
-    val pythonCmd = s"$pythonExec /pyNdp/dike/client/spark_driver.py"
+    val pythonExec = s"${rootPath}/bin/python"
+    val sparkDriverPath = "lib/python3.8/site-packages/pydike/client/spark_driver.py"
+    val pythonCmd = s"$pythonExec ${rootPath}/${sparkDriverPath}"
     val stdout = new StringBuilder
     val stderr = new StringBuilder
     val status = Process(s"$pythonCmd", None,
@@ -794,33 +795,5 @@ object GenericPushdownOptimizationRule extends Rule[LogicalPlan] {
     logger.info(s"python stdout: ${stdout.toString}")
     logger.info(s"python stderr: ${stderr.toString}")
     stdout.toString
-    /* val command = Array("python3", "/pyNdp/dike/client/spark_driver.py")
-    val envp = Array("PYTHONPATH=/pyNdp:/build/spark-3.2.0/python")
-
-    val p = Runtime.getRuntime().exec(command, envp);
-    val stdInput = new BufferedReader(new InputStreamReader(p.getInputStream()))
-    val stdError = new BufferedReader(new InputStreamReader(p.getErrorStream()))
-    val pickledCommand = stdInput.readLine()
-    logger.info(pickledCommand)
-    val errOutput = Stream.continually(stdError.readLine()).takeWhile(_ != null).mkString("\n")
-    logger.info(s"stderr: $errOutput")
-    p.waitFor()
-    pickledCommand */
-  }
-  def test: Unit = {
-    val pyInterp = new org.python.util.PythonInterpreter()
-    val result = try {
-      pyInterp.exec("import sys\n")
-      pyInterp.exec("sys.path.insert(1, '/build/')\n")
-      pyInterp.exec("from dike import dike\n")
-      pyInterp.eval("dike.get_code(\"foo\")")
-    } catch {
-      case e : Throwable =>
-        logger.info("an exception occurred: " + ExceptionUtils.getStackTrace(e))
-        None
-    } finally {
-      if (pyInterp != null) pyInterp.close()
-    }
-    logger.info("result: $result")
   }
 }

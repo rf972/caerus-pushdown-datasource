@@ -52,11 +52,12 @@ class GenericPythonRunner(function: Array[Byte], dag: String) {
     workerEnv.put("PYTHONHASHSEED", "0")
     // val curDir = System.getProperty("user.dir")
     // logger.info(s"current working directory: ${curDir}")
+    val rootPath = SparkFiles.getRootDirectory() + "/pydike_venv"
     val func = PythonFunction(
       command = function,
       envVars = workerEnv,
       pythonIncludes = List.empty[String].asJava,
-      pythonExec = "./pyspark_venv/bin/python",
+      pythonExec = s"${rootPath}/bin/python",
       pythonVer = "3.8",
       broadcastVars = List.empty[Broadcast[PythonBroadcast]].asJava,
       accumulator = null)
