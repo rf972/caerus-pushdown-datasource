@@ -46,8 +46,12 @@ class GenericVectReader(schema: StructType,
   }
   def close(): Unit = {
   }
-  private val stream = reader.getStream
+  private def stream: DataInputStream = {
+    reader.getStream
+  }
   private var rowsReturned: Long = 0
+  private var batchesAvailable: Boolean = true
+  private var streamCloseNeeded: Boolean = false
   private var currentBatchSize: Int = 0
   private var batchIdx: Long = 0
   // private val (numCols: Int, dataTypes: Array[DataType]) = (schema.names.length,
@@ -69,11 +73,11 @@ class GenericVectReader(schema: StructType,
       }
       val nColsLong = stream.readLong()
       val nCols: Integer = nColsLong.toInt
-      // logger.info("nCols : " + String.valueOf(nCols))
+      logger.info("nCols : " + String.valueOf(nCols))
       val dataTypes = new Array[Int](nCols)
       for (i <- 0 until nCols) {
         dataTypes(i) = (stream.readLong()).toInt
-        // logger.info(s" datatype[$i] ${dataTypes(i)}")
+        logger.info(s" datatype[$i] ${dataTypes(i)}")
       }
       /* for (i <- 0 until 32) {
         val nextInt = (stream.readInt().toInt)
@@ -118,21 +122,30 @@ class GenericVectReader(schema: StructType,
    * @return Boolean, true if more rows, false if none.
    */
   private def nextBatch(): Boolean = {
-    if (rowsReturned > 0) {
+    if (batchesAvailable == false) {
+      logger.info(s"nextBatch batchesAvailable $batchesAvailable")
+      false
+    }
+    else if (streamCloseNeeded) {
       // For now we only allow one batch
       // On the next read we will close out the stream.
+      logger.info(s"nextBatch streamCloseNeeded $streamCloseNeeded")
       val len = stream.readInt()
       len match {
         case length if length > 0 =>
         case readType => reader.handleRead(readType)
       }
+      logger.info(s"nextBatch streamCloseNeeded $streamCloseNeeded Done.")
+      streamCloseNeeded = false
+      batchesAvailable = false
       false
     } else {
+      streamCloseNeeded = true
       columnarBatch.setNumRows(0)
       val rows = readNextBatch()
-      if (rows == 0) {
-        logger.info(s"nextBatch Done rows: ${rows} total: ${rowsReturned}")
-      }
+      // if (rows == 0) {
+      logger.info(s"nextBatch readNextBatch rows: ${rows} total: ${rowsReturned}")
+      // }
       rowsReturned += rows
       columnarBatch.setNumRows(rows.toInt)
       currentBatchSize = rows

@@ -68,30 +68,10 @@ class GenericColumnVector(batchSize: Integer, dataType: Int, schema: StructType)
   // private val factory = LZ4Factory.fastestInstance()
   // private val decompressor = factory.fastDecompressor()
   // val decompressor = factory.safeDecompressor()
-  val (byteBuffer: ByteBuffer,
-       bufferLength: Integer,
-       compressedBuffer: ByteBuffer,
-       compressedBufLen: Integer,
-       stringIndex: Array[Int],
-       stringLen: ByteBuffer) = {
-    var stringIndex = Array[Int](0)
-    var stringLen = ByteBuffer.allocate(0)
-    val bytes: Int = NdpCompressedDataType(dataType) match {
-      case NdpCompressedDataType.LongType => 8
-      case NdpCompressedDataType.DoubleType => 8
-      case NdpCompressedDataType.ByteArrayType =>
-      // Assumes single byte length field.
-      stringIndex = new Array[Int](batchSize)
-      stringLen = ByteBuffer.allocate(batchSize)
-      128
-      case _ => 0
-    }
-    (ByteBuffer.allocate(batchSize * bytes),
-     (batchSize * bytes).asInstanceOf[Integer],
-     ByteBuffer.allocate(batchSize * bytes),
-     (batchSize * bytes).asInstanceOf[Integer],
-     stringIndex, stringLen)
-  }
+  var (byteBuffer: ByteBuffer,
+       bufferLength: Int) = (ByteBuffer.allocate(0), 0)
+  var (stringIndex: Array[Int],
+       stringLen: ByteBuffer) = (Array.empty[Int], ByteBuffer.allocate(0))
   private val header = ByteBuffer.allocate(4 * 4)
   private var fixedTextLen: Int = 0
   def close(): Unit = {}
@@ -107,6 +87,26 @@ class GenericColumnVector(batchSize: Integer, dataType: Int, schema: StructType)
   def getLong(row: Int): Long = { byteBuffer.getLong(row * 8) }
   def getMap(row: Int): org.apache.spark.sql.vectorized.ColumnarMap = { null }
   def getShort(row: Int): Short = { byteBuffer.getShort(row * 2) }
+  def getLen1(row: Int): Int = {
+    var baseIndex = fixedTextLen * row
+    var l = fixedTextLen
+    for (i <- 0 until fixedTextLen) {
+      if (byteBuffer.get(baseIndex + i) == 0) {
+        l = i
+      }
+    }
+    l
+  }
+  def getFixedStringLen(row: Int): Int = {
+    def findLen(i: Int, max: Int): Int = {
+      if (i == max) i
+      else if (byteBuffer.get(i) == 0) i
+      else findLen(i + 1, max)
+    }
+
+    val i = findLen(row * fixedTextLen, ((row + 1) * fixedTextLen)) - (row * fixedTextLen)
+    i
+  }
   def getUTF8String(row: Int): org.apache.spark.unsafe.types.UTF8String = {
     NdpCompressedDataType(dataType) match {
        case NdpCompressedDataType.LongType => UTF8String.fromString(
@@ -115,7 +115,8 @@ class GenericColumnVector(batchSize: Integer, dataType: Int, schema: StructType)
                                           byteBuffer.getDouble(row * 8).toString)
       case NdpCompressedDataType.ByteArrayType =>
         if (fixedTextLen > 0) {
-          UTF8String.fromBytes(byteBuffer.array(), fixedTextLen * row, fixedTextLen)
+          val length = getFixedStringLen(row)
+          UTF8String.fromBytes(byteBuffer.array(), fixedTextLen * row, length)
         } else {
           val offset = stringIndex(row)
           val length = stringLen.get(row)
@@ -140,8 +141,7 @@ class GenericColumnVector(batchSize: Integer, dataType: Int, schema: StructType)
     var rows: Int = 0
     try {
       var bytesRead = 0
-      val stream = reader.getStream
-      rows = readColumnData(stream)
+      rows = readColumnData(reader.getStream)
     } catch {
       case ex: EOFException =>
         // logger.warn(ex.toString)
@@ -169,19 +169,15 @@ class GenericColumnVector(batchSize: Integer, dataType: Int, schema: StructType)
       var compressed = (numBytes > 0)
       val headerDataType = header.getInt(NdpCompHeaderOffset.DataType)
       val dataBytes = header.getInt(NdpCompHeaderOffset.DataLen)
-
-      NdpCompressedDataType(headerDataType) match {
-        case NdpCompressedDataType.LongType =>
-          // logger.info(s"${tId}:${id}) read ${numBytes.toInt} bytes (Long)")
-          if (compressed) {
-            val cb = new Array[Byte](numBytes.toInt)
-            stream.readFully(cb, 0, numBytes.toInt)
-            // logger.info(s"${tId}:${id}) decompressing (Double)")
-            Zstd.decompress(byteBuffer.array(), cb)
-          } else {
+      if (dataBytes == 0) {
+        rows
+      } else {
+        NdpCompressedDataType(headerDataType) match {
+          case NdpCompressedDataType.LongType =>
+            // logger.info(s"${tId}:${id}) read ${numBytes.toInt} bytes (Long)")
+            byteBuffer = ByteBuffer.allocate(dataBytes)
             stream.readFully(byteBuffer.array(), 0, dataBytes)
-          }
-          /* for (i <- 0 until 4) {
+            /* for (i <- 0 until 4) {
             logger.info(s"[$i] ${byteBuffer.getLong(i * 8)}")
           }
           for (i <- (dataBytes - 32) / 8 until dataBytes / 8) {
@@ -194,86 +190,47 @@ class GenericColumnVector(batchSize: Integer, dataType: Int, schema: StructType)
           for (i <- 0 until 4) {
             logger.info(s"[$i] ${byteBuffer.getDouble(i * 8)}")
           } */
-          rows = dataBytes.toInt / 8
-          fixedTextLen = 0
-          // logger.info(s"${tId}:${tId}:${id}) decompressed ${numBytes.toInt} bytes " +
-          //             s"-> ${dataBytes} (Long)")
-          if (rows > batchSize) {
-            throw new Exception(s"rows ${rows} > batchSize ${batchSize}")
-          }
-        case NdpCompressedDataType.DoubleType =>
-          // logger.info(s"${tId}:${id}) read ${numBytes.toInt} bytes (Double)")
-          if (compressed) {
-            val cb = new Array[Byte](numBytes.toInt)
-            stream.readFully(cb, 0, numBytes.toInt)
-            // logger.info(s"${tId}:${id}) decompressing (Double)")
-            Zstd.decompress(byteBuffer.array(), cb)
-          } else {
+            rows = dataBytes.toInt / 8
+            fixedTextLen = 0
+            // logger.info(s"${tId}:${tId}:${id}) decompressed ${numBytes.toInt} bytes " +
+            //             s"-> ${dataBytes} (Long)")
+          case NdpCompressedDataType.DoubleType =>
+            // logger.info(s"${tId}:${id}) read ${numBytes.toInt} bytes (Double)")
+            byteBuffer = ByteBuffer.allocate(dataBytes)
             stream.readFully(byteBuffer.array(), 0, dataBytes)
-          }
-          rows = dataBytes.toInt / 8
-          fixedTextLen = 0
-          // logger.info(s"${tId}:${id}) decompressed ${numBytes.toInt} " +
-          //             s"-> bytes ${dataBytes} (Double)")
-          if (rows > batchSize) {
-            throw new Exception(s"rows ${rows} > batchSize ${batchSize}")
-          }
-        case NdpCompressedDataType.FixedLenByteArrayType =>
-          fixedTextLen = header.getInt(NdpCompHeaderOffset.TypeSize)
-          if (dataBytes.toInt > bufferLength) {
-            throw new Exception(s"dataBytes ${dataBytes.toInt} > bufferLength ${bufferLength}")
-          }
-          if (compressed) {
-            val cb = new Array[Byte](numBytes.toInt)
-            stream.readFully(cb, 0, numBytes.toInt)
-            Zstd.decompress(byteBuffer.array(), cb)
-          } else {
+            rows = dataBytes.toInt / 8
+            fixedTextLen = 0
+            // logger.info(s"${tId}:${id}) decompressed ${numBytes.toInt} " +
+            //             s"-> bytes ${dataBytes} (Double)")
+          case NdpCompressedDataType.FixedLenByteArrayType =>
+            fixedTextLen = header.getInt(NdpCompHeaderOffset.TypeSize)
+            byteBuffer = ByteBuffer.allocate(dataBytes)
             stream.readFully(byteBuffer.array(), 0, dataBytes.toInt)
-          }
-          rows = dataBytes.toInt / fixedTextLen
-        case NdpCompressedDataType.ByteArrayType =>
-          val indexBytes = header.getInt(NdpCompHeaderOffset.DataLen)
-          if (compressed) {
-            // Read and decompress string index.
-            var cb = new Array[Byte](numBytes.toInt)
-            stream.readFully(cb, 0, numBytes.toInt)
-            // logger.info(s"${tId}:${id},${tId}) read ${numBytes.toInt} bytes (String Index)")
-            // logger.info(s"${tId}:${id}) decompressing (String Index)")
-            Zstd.decompress(stringLen.array(), cb)
-          } else {
+            rows = dataBytes.toInt / fixedTextLen
+          case NdpCompressedDataType.ByteArrayType =>
+            val indexBytes = header.getInt(NdpCompHeaderOffset.DataLen)
+            stringLen = ByteBuffer.allocate(indexBytes)
+            stringIndex = new Array[Int](indexBytes)
             stream.readFully(stringLen.array(), 0, indexBytes.toInt)
-          }
-          rows = indexBytes
-          fixedTextLen = 0
-          // logger.info(s"${tId}:${id}) decompressed ${numBytes.toInt} -> " +
-          //             s"bytes ${indexBytes} (String Index)")
-          if (rows > batchSize) {
-            throw new Exception(s"rows ${rows} > batchSize ${batchSize}")
-          }
-          var idx = 0
-          for (i <- 0 until rows) {
-            stringIndex(i) = idx
-            idx += stringLen.get(i) & 0xFF
-          }
-          stream.readFully(header.array(), 0, header.capacity())
-          val compressedBytes = header.getInt(NdpCompHeaderOffset.CompressedLen)
-          val dataBytes = header.getInt(NdpCompHeaderOffset.DataLen)
-          compressed = (compressedBytes > 0)
-          if (compressed) {
-            val cb = new Array[Byte](compressedBytes.toInt)
-            stream.readFully(cb, 0, compressedBytes.toInt)
-            // logger.info(s"${tId}:${id}) read ${compressedBytes.toInt} bytes (String)")
-            // logger.info(s"${tId}:${id}) decompressing (String)")
-            Zstd.decompress(byteBuffer.array(), cb)
-          } else {
-            logger.info("")
+            rows = indexBytes
+            fixedTextLen = 0
+            // logger.info(s"${tId}:${id}) decompressed ${numBytes.toInt} -> " +
+            //             s"bytes ${indexBytes} (String Index)")
+            var idx = 0
+            for (i <- 0 until rows) {
+              stringIndex(i) = idx
+              idx += stringLen.get(i) & 0xFF
+            }
+            stream.readFully(header.array(), 0, header.capacity())
+            val dataBytes = header.getInt(NdpCompHeaderOffset.DataLen)
+            byteBuffer = ByteBuffer.allocate(dataBytes)
             stream.readFully(byteBuffer.array(), 0, dataBytes.toInt)
-          }
-          // logger.info(s"${tId}:${id}) decompressed ${dataBytes.toInt} bytes " +
-          //             s"-> ${dataBytes} (String)")
-          if (dataBytes > bufferLength) {
-            throw new Exception(s"textBytes ${compressedBytes} > bufferLength ${bufferLength}")
-          }
+            // logger.info(s"${tId}:${id}) decompressed ${dataBytes.toInt} bytes " +
+            //             s"-> ${dataBytes} (String)")
+            for (i <- 0 until rows) {
+              logger.info(s"${i}) ${getUTF8String(i)}")
+            }
+        }
       }
     } catch {
       case ex: EOFException =>
@@ -281,40 +238,6 @@ class GenericColumnVector(batchSize: Integer, dataType: Int, schema: StructType)
       case ex: Exception =>
         logger.warn(ex.toString)
         throw ex
-    }
-    rows
-  }
-
-  /** fetches the data for a columnar batch and
-   *  returns the number of rows read.
-   *  The data is read into the already pre-allocated
-   *  arrays for the data.  Note that if the already allocated
-   *  buffers are not big enough for the data, we will throw an Exception.
-   *
-   *  @param stream the stream of data with NDP binary columnar format.
-   *  @return Int the number of rows returned.
-   */
-  def readColumnOld(reader: ReaderIteratorExBase[Array[Byte]]): Int = {
-    var rows: Int = 0
-    // val bytes: Array[Byte] = reader.next()
-    reader.getStream.readInt() match {
-      case length if length > 0 =>
-        val byteArray = new Array[Byte](length)
-        reader.getStream.readFully(byteArray)
-        logger.info(s"Found length $length datatype $dataType")
-        /* dataType match {
-          case LongType => val s = new String(byteArray, StandardCharsets.UTF_8)
-            val entries = s.split(",")
-            rows = entries.length
-            for (i <- 0 until entries.length) {
-              logger.info(s"Found Long ${entries(i).toLong}")
-              byteBuffer.putLong(i * 8, entries(i).toLong)
-            }
-        } */
-      case readType =>
-        logger.info(s"Found readType $readType")
-        rows = 0
-        reader.handleRead(readType)
     }
     rows
   }

@@ -36,6 +36,7 @@ import javax.json.JsonWriter
 
 import scala.collection.mutable.ArrayBuilder
 
+import com.github.datasource.common.PushdownSqlStatus.PushdownSqlStatus
 import org.slf4j.LoggerFactory
 
 import org.apache.spark.sql.catalyst.expressions._
@@ -52,6 +53,8 @@ class PushdownSQL(schema: StructType,
                   queryCols: Array[String]) {
 
   protected val logger = LoggerFactory.getLogger(getClass)
+  protected val validFilters = filters.filter(f => PushdownSQL.validateFilterExpression(f))
+
   /**
    * Use the given schema to look up the attribute's data type. Returns None if the attribute could
    * not be resolved.
@@ -73,7 +76,7 @@ class PushdownSQL(schema: StructType,
    *                scan.
    */
   def buildWhereClause(): String = {
-    val filterExpressions = filters.flatMap(f => buildFilterExpression(f)).mkString(" AND ")
+    val filterExpressions = validFilters.flatMap(f => buildFilterExpression(f)).mkString(" AND ")
     if (filterExpressions.isEmpty) "" else "WHERE " + filterExpressions
   }
   /**
@@ -128,7 +131,7 @@ class PushdownSQL(schema: StructType,
       // to help evaluate pushdown.  For production consider to reject
       // the pushdown completely.
       case IsNull(attr) => if (true) {
-        None // Option(s"${attr.name} IS NULL")
+        None // Option("TRUE") // Option(s"${attr.name} IS NULL")
       } else {
         Option("TRUE")
       }
@@ -137,7 +140,7 @@ class PushdownSQL(schema: StructType,
       // to help evaluate pushdown.  For production consider to reject
       // the pushdown completely.
       case IsNotNull(attr) => if (true) {
-        None // Option(s"${attr.name} IS NOT NULL")
+        None // Option("TRUE") // Option(s"${attr.name} IS NOT NULL")
       } else {
         Option("TRUE")
       }
@@ -198,9 +201,73 @@ class PushdownSQL(schema: StructType,
 
 object PushdownSQL {
 
+  protected val logger = LoggerFactory.getLogger(getClass)
   def apply(schema: StructType,
             filters: Seq[Expression],
             queryCols: Array[String]): PushdownSQL = {
     new PushdownSQL(schema, filters, queryCols)
+  }
+
+  private val filterMaxDepth = 100
+
+  def validateFilterExpression(expr: Expression, depth: Int = 0): Boolean = {
+    if (depth > filterMaxDepth) {
+      /* Reached depth unsupported by NDP server. */
+      return false
+    }
+    /* Traverse the tree and validate the nodes are supported. */
+    expr match {
+      case Or(left, right) => validateFilterExpression(left, depth + 1) &&
+        validateFilterExpression(right, depth + 1)
+      /* case And(left, right) => validateFilterExpression(left, depth + 1) &&
+                              validateFilterExpression(right, depth + 1)
+      case Not(filter) => validateFilterExpression(filter, depth + 1) */
+      case EqualTo(left, right) => validateFilterExpression(left, depth + 1) &&
+        validateFilterExpression(right, depth + 1)
+      case LessThan(left, right) => validateFilterExpression(left, depth + 1) &&
+        validateFilterExpression(right, depth + 1)
+      case GreaterThan(left, right) => validateFilterExpression(left, depth + 1) &&
+        validateFilterExpression(right, depth + 1)
+      case LessThanOrEqual(left, right) => validateFilterExpression(left, depth + 1) &&
+        validateFilterExpression(right, depth + 1)
+      case GreaterThanOrEqual(left, right) => validateFilterExpression(left, depth + 1) &&
+        validateFilterExpression(right, depth + 1)
+      case IsNull(attr) => validateFilterExpression(attr, depth + 1)
+      case IsNotNull(attr) => validateFilterExpression(attr, depth + 1)
+      /* case StartsWith(left, right) => validateFilterExpression(left, depth + 1) &&
+                                    validateFilterExpression(right, depth + 1)
+      case EndsWith(left, right) => validateFilterExpression(left, depth + 1) &&
+                                    validateFilterExpression(right, depth + 1)
+      case Contains(left, right) => validateFilterExpression(left, depth + 1) &&
+                                    validateFilterExpression(right, depth + 1) */
+      case attrib @ AttributeReference(name, dataType, nullable, meta) =>
+        true
+      case Literal(value, dataType) =>
+        true
+      case Cast(expression, dataType, timeZoneId, _) =>
+        true
+      case other@_ => logger.warn("unknown filter:" + other)
+        /* Reached an unknown node, return validation failed. */
+        false
+    }
+  }
+  def validateFilters(filters: Seq[Expression]): PushdownSqlStatus = {
+    var status: Boolean = true
+    var invalidCount = 0
+    var validCount = 0
+    for (f <- filters) {
+      if (validateFilterExpression(f)) {
+        validCount += 1
+      } else {
+        invalidCount += 1
+      }
+    }
+    if (invalidCount == 0 && validCount > 0) {
+      PushdownSqlStatus.FullyValid
+    } else if (invalidCount > 0 && validCount > 0) {
+      PushdownSqlStatus.PartiallyValid
+    } else {
+      PushdownSqlStatus.Invalid
+    }
   }
 }

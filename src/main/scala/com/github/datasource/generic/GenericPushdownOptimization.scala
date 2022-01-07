@@ -22,7 +22,7 @@ import java.util.HashMap
 import scala.collection.mutable
 import scala.util.{Either, Left => EitherLeft, Right => EitherRight}
 
-import com.github.datasource.common.{PushdownJson, PushdownJsonStatus, PushdownSQL}
+import com.github.datasource.common.{PushdownJson, PushdownJsonStatus, PushdownSQL, PushdownSqlStatus}
 import org.json._
 import org.slf4j.LoggerFactory
 import sys.process._
@@ -311,16 +311,16 @@ object GenericPushdownOptimizationRule extends Rule[LogicalPlan] {
     val ndpRel = getNdpRelation(path, processorId)
     val filtersStatus = {
       if (scanOpts.containsKey("ndpdisablefilterpush")) {
-        PushdownJsonStatus.Invalid
-      } else PushdownJson.validateFilters(filters)
+        PushdownSqlStatus.Invalid
+      } else PushdownSQL.validateFilters(filters)
     }
     var references = {
       filtersStatus match {
-        case PushdownJsonStatus.Invalid =>
+        case PushdownSqlStatus.Invalid =>
           (attrReferences ++ filterReferences).distinct
-        case PushdownJsonStatus.PartiallyValid =>
+        case PushdownSqlStatus.PartiallyValid =>
           (attrReferences ++ filterReferences).distinct
-        case PushdownJsonStatus.FullyValid =>
+        case PushdownSqlStatus.FullyValid =>
           attrReferences.distinct
       }
     }
@@ -343,34 +343,32 @@ object GenericPushdownOptimizationRule extends Rule[LogicalPlan] {
       }
       finally fw.close()
     }
-    val filtersJson: String = {
-      if (filtersStatus != PushdownJsonStatus.Invalid) {
-        val filtersJson = PushdownJson.getFiltersJson(filters, test)
+    val allRefs = (attrReferences ++ filterReferences)
+    val queryCols = allRefs.distinct.toStructType.fields.map(x => s"${x.name}")
+    val sqlQuery: String = {
+      if (filtersStatus != PushdownSqlStatus.Invalid) {
+        val pushdownSql = PushdownSQL(references.toStructType, filters, queryCols)
+        val query = pushdownSql.query
         logger.warn("Pushdown " + opt.getOrDefault("currenttest", "") +
-          " Filter Json " + filtersJson)
-        opt.put("ndpjsonfilters", filtersJson)
-        filtersJson
+          " query " + query)
+        query
       } else {
         logger.warn("No Pushdown " + filters.toString)
         ""
       }
     }
+    logger.info(s"sqlQuery: ${sqlQuery}")
+    val configString = ProcessorRequestConfig(sqlQuery).configString
+    opt.put("ndpConfig", configString)
     opt.put("ndpprojectcolumns", cols)
     // Once we know what the file is, we will replace the FILE_TAG
     // with the actual file (for all the files we need to process).
     // val projectJson = PushdownJson.getProjectJson(cols.split(","), test)
-    val allRefs = (attrReferences ++ filterReferences)
-    val queryCols = allRefs.distinct.toStructType.fields.map(x => s"${x.name}")
-    // val sqlJson = PushdownSQL(references.toStructType, filters, queryCols).jsonQuery
-    val sqlQuery = PushdownSQL(references.toStructType, filters, queryCols).query
-    logger.info(s"sqlQuery: ${sqlQuery}")
-    val configString = ProcessorRequestConfig(sqlQuery).configString
-    opt.put("ndpConfig", configString)
     val hdfsScanObject = new GenericPushdownScan(references.toStructType, opt)
     val scanRelation = DataSourceV2ScanRelation(ndpRel.get, hdfsScanObject, references)
     val filterCondition = filters.reduceLeftOption(And)
     val withFilter = {
-      if (filtersStatus == PushdownJsonStatus.FullyValid) {
+      if (filtersStatus == PushdownSqlStatus.FullyValid) {
         /* Clip the filter from the DAG, since we are going to
          * push down the entire filter to NDP.
          */

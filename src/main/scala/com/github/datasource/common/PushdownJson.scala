@@ -41,7 +41,7 @@ import org.apache.spark.sql.types._
 
 object PushdownJson {
 
-  private val filterMaxDepth = 2
+  private val filterMaxDepth = 100
 
   protected val logger = LoggerFactory.getLogger(getClass)
 
